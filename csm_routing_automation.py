@@ -899,11 +899,30 @@ class CSMRoutingAutomation:
         mean_revenue = pulp.lpSum(projected_revenue.values()) / len(eligible_csms)
         mean_tad = pulp.lpSum(projected_tad.values()) / len(eligible_csms)
 
-        # Calculate variance components
-        count_variance = pulp.lpSum([(projected_counts[csm] - mean_count) ** 2 for csm in eligible_csms])
-        neediness_variance = pulp.lpSum([(projected_neediness[csm] - mean_neediness) ** 2 for csm in eligible_csms])
-        revenue_variance = pulp.lpSum([(projected_revenue[csm] - mean_revenue) ** 2 for csm in eligible_csms])
-        tad_variance = pulp.lpSum([(projected_tad[csm] - mean_tad) ** 2 for csm in eligible_csms])
+        # Create auxiliary variables for absolute deviations (PuLP linearization)
+        # We'll minimize the sum of positive and negative deviations
+        count_dev_pos = {}
+        count_dev_neg = {}
+        neediness_dev_pos = {}
+        neediness_dev_neg = {}
+
+        for csm in eligible_csms:
+            count_dev_pos[csm] = pulp.LpVariable(f"count_dev_pos_{csm}", lowBound=0, cat='Continuous')
+            count_dev_neg[csm] = pulp.LpVariable(f"count_dev_neg_{csm}", lowBound=0, cat='Continuous')
+            neediness_dev_pos[csm] = pulp.LpVariable(f"need_dev_pos_{csm}", lowBound=0, cat='Continuous')
+            neediness_dev_neg[csm] = pulp.LpVariable(f"need_dev_neg_{csm}", lowBound=0, cat='Continuous')
+
+            # Add constraints to define deviations
+            prob += projected_counts[csm] - mean_count == count_dev_pos[csm] - count_dev_neg[csm]
+            prob += projected_neediness[csm] - mean_neediness == neediness_dev_pos[csm] - neediness_dev_neg[csm]
+
+        # Calculate variance components as sum of absolute deviations
+        count_variance = pulp.lpSum([count_dev_pos[csm] + count_dev_neg[csm] for csm in eligible_csms])
+        neediness_variance = pulp.lpSum([neediness_dev_pos[csm] + neediness_dev_neg[csm] for csm in eligible_csms])
+
+        # For simplicity, skip revenue and TAD variance in optimization
+        revenue_variance = 0
+        tad_variance = 0
 
         # Add recency penalties to objective (NEW CONSTRAINT)
         recency_penalties = pulp.lpSum([

@@ -77,47 +77,48 @@ def test_single_account():
         # Debug: print column names
         logger.info(f"Dataframe columns: {needs_csm_df.columns.tolist()}")
 
-        # Take only the first account for testing
-        single_account_df = needs_csm_df.head(1)
-        account_id = single_account_df.iloc[0]['account_id']
+        # Take 3-4 accounts for testing
+        test_accounts_df = needs_csm_df.head(4)  # Get up to 4 accounts
+        account_ids = test_accounts_df['account_id'].tolist()
 
-        logger.info(f"\nProcessing single account: {account_id}")
+        logger.info(f"\nProcessing {len(test_accounts_df)} accounts for testing:")
+        for acc_id in account_ids:
+            logger.info(f"  - {acc_id}")
 
         # Enrich the account data
         logger.info("\n" + "=" * 80)
         logger.info("STEP 2: Enriching account data...")
         logger.info("=" * 80)
 
-        enriched_df = automation.enrich_account_data(single_account_df)
+        enriched_df = automation.enrich_account_data(test_accounts_df)
 
         if enriched_df.empty:
             logger.error("Failed to enrich account data")
             return False
 
-        account_info = enriched_df.iloc[0]
-        logger.info("\nEnriched Account Details:")
-        logger.info(f"  Account ID: {account_info.get('account_id')}")
-        logger.info(f"  Tenant ID: {account_info.get('tenant_id')}")
-        logger.info(f"  Segment: {account_info.get('segment', 'Unknown')}")
-        logger.info(f"  Account Level: {account_info.get('account_level', 'Unknown')}")
-        logger.info(f"  Neediness Score: {account_info.get('neediness_score', 0)}")
-        logger.info(f"  Neediness Category: {account_info.get('neediness_category', 'Unknown')}")
-        logger.info(f"  Health Segment: {account_info.get('health_segment', 'Unknown')}")
-        logger.info(f"  Revenue: ${account_info.get('revenue', 0):,.2f}")
-        logger.info(f"  Tech Count: {account_info.get('tech_count', 0)}")
-        logger.info(f"  TAD Score: {account_info.get('tad_score', 0)}")
-        logger.info(f"  Churn Risk: {account_info.get('churn_stage', 'Not at risk')}")
+        logger.info(f"\nEnriched {len(enriched_df)} Account Details:")
+        for idx, account_info in enriched_df.iterrows():
+            logger.info(f"\nAccount {idx + 1}:")
+            logger.info(f"  Account ID: {account_info.get('account_id')}")
+            logger.info(f"  Tenant ID: {account_info.get('tenant_id')}")
+            logger.info(f"  Segment: {account_info.get('segment', 'Unknown')}")
+            logger.info(f"  Account Level: {account_info.get('account_level', 'Unknown')}")
+            logger.info(f"  Neediness Score: {account_info.get('neediness_score', 0)}")
+            logger.info(f"  Neediness Category: {account_info.get('neediness_category', 'Unknown')}")
+            logger.info(f"  Health Segment: {account_info.get('health_segment', 'Unknown')}")
+            logger.info(f"  Revenue: ${account_info.get('revenue', 0):,.2f}")
+            logger.info(f"  Tech Count: {account_info.get('tech_count', 0)}")
+            logger.info(f"  TAD Score: {account_info.get('tad_score', 0)}")
+            logger.info(f"  Churn Risk: {account_info.get('churn_stage', 'Not at risk')}")
 
-        # Check if it's a Residential Corporate account
-        is_resi_corp = (
-            account_info.get('segment') == 'Residential' and
-            account_info.get('account_level') == 'Corporate'
+        # Filter for Residential Corporate accounts (but process all for testing)
+        resi_corp_mask = (
+            (enriched_df['segment'] == 'Residential') &
+            (enriched_df['account_level'] == 'Corporate')
         )
 
-        if not is_resi_corp:
-            logger.warning(f"Account is not Residential Corporate (Segment: {account_info.get('segment')}, Level: {account_info.get('account_level')})")
-            logger.info("Note: Current automation only processes Residential Corporate accounts")
-            # Continue anyway for testing
+        resi_corp_count = resi_corp_mask.sum()
+        logger.info(f"\nFound {resi_corp_count} Residential Corporate accounts out of {len(enriched_df)} total")
 
         # Get current CSM books
         logger.info("\n" + "=" * 80)
@@ -158,38 +159,52 @@ def test_single_account():
 
         automation.create_recommendations_table()
 
-        # Process the single account assignment
+        # Process multiple accounts assignment
         logger.info("\n" + "=" * 80)
-        logger.info("STEP 5: Running optimization for single account...")
+        logger.info(f"STEP 5: Running optimization for {len(enriched_df)} accounts...")
         logger.info("=" * 80)
 
-        # Use the same logic as the main run method but for single account
-        if is_resi_corp:
-            resi_corp_df = enriched_df
+        # Process all accounts for testing
+        resi_corp_df = enriched_df
+
+        assignments = {}
+
+        # Check if we should use batch or single processing
+        if len(resi_corp_df) == 1:
+            # Single account - use optimized best fit
+            logger.info("Processing single account with optimized best fit")
+            account = resi_corp_df.iloc[0]
+            csm, score = automation.assign_single_account_optimized(account, csm_books)
+            if csm:
+                assignments[account['account_id']] = csm
+                # Update the csm_books for tracking
+                csm_books[csm]['count'] += 1
+                csm_books[csm]['total_neediness'] += account.get('neediness_score', 0)
         else:
-            logger.info("Processing non-Residential Corporate account for testing...")
-            resi_corp_df = enriched_df
+            # Multiple accounts - use PuLP optimization for batch
+            logger.info(f"Processing {len(resi_corp_df)} accounts with PuLP batch optimization")
+            assignments = automation.optimize_batch_with_pulp(resi_corp_df, csm_books)
 
-        # Run the assignment
-        csm, score = automation.assign_single_account_optimized(resi_corp_df.iloc[0], csm_books)
-
-        if csm:
+        if assignments:
             logger.info(f"\n" + "=" * 50)
-            logger.info(f"ASSIGNMENT RESULT:")
-            logger.info(f"  Account {account_id} -> CSM {csm}")
-            logger.info(f"  Optimization Score: {score:.2f}")
+            logger.info(f"ASSIGNMENT RESULTS:")
+            for account_id, csm in assignments.items():
+                account_data = resi_corp_df[resi_corp_df['account_id'] == account_id].iloc[0]
+                logger.info(f"  Account {account_id} (Neediness: {account_data['neediness_score']}) -> CSM {csm}")
             logger.info(f"=" * 50)
 
-            assignments = {account_id: csm}
-
-            # Get CSM details
-            csm_info = csm_books.get(csm, {})
+            # Get CSM details for all assigned CSMs
+            assigned_csms = set(assignments.values())
             logger.info(f"\nAssigned CSM Details:")
-            logger.info(f"  Name: {csm}")
-            logger.info(f"  Current Accounts: {csm_info.get('count', 0)}")
-            logger.info(f"  After Assignment: {csm_info.get('count', 0) + 1}")
-            logger.info(f"  Tenure: {csm_info.get('tenure_category', 'Unknown')} ({csm_info.get('tenure_months', 0)} months)")
-            logger.info(f"  Health Distribution: Red={csm_info.get('health_distribution', {}).get('Red', 0)}, Yellow={csm_info.get('health_distribution', {}).get('Yellow', 0)}, Green={csm_info.get('health_distribution', {}).get('Green', 0)}")
+            for csm in assigned_csms:
+                csm_info = csm_books.get(csm, {})
+                accounts_assigned = list(assignments.values()).count(csm)
+                logger.info(f"\n  CSM: {csm}")
+                logger.info(f"    Current Accounts: {csm_info.get('count', 0)}")
+                logger.info(f"    New Assignments: {accounts_assigned}")
+                logger.info(f"    After Assignment: {csm_info.get('count', 0) + accounts_assigned}")
+                logger.info(f"    Tenure: {csm_info.get('tenure_category', 'Unknown')} ({csm_info.get('tenure_months', 0)} months)")
+                logger.info(f"    Health Distribution: Red={csm_info.get('health_distribution', {}).get('Red', 0)}, Yellow={csm_info.get('health_distribution', {}).get('Yellow', 0)}, Green={csm_info.get('health_distribution', {}).get('Green', 0)}")
 
             # LLM Review (if available)
             if automation.claude_client:
@@ -231,7 +246,7 @@ def test_single_account():
             automation.generate_balance_report(csm_books)
 
         else:
-            logger.error(f"No eligible CSM found for account {account_id}")
+            logger.error(f"No eligible CSM found for any accounts")
             return False
 
         # Close Snowflake connection
