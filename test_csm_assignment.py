@@ -212,6 +212,9 @@ def test_single_account():
                 logger.info("STEP 6: Getting LLM review of assignment...")
                 logger.info("=" * 80)
 
+                # Keep track of original assignments for comparison
+                original_assignments = assignments.copy()
+
                 should_rerun, llm_feedback, revised_assignments = automation.review_assignments_with_llm(
                     assignments, resi_corp_df, csm_books
                 )
@@ -222,6 +225,89 @@ def test_single_account():
 
                 if should_rerun:
                     logger.warning("LLM suggests reconsidering this assignment")
+
+                    # Check if LLM provided revised assignments
+                    if revised_assignments and revised_assignments != assignments:
+                        logger.info("\n" + "=" * 80)
+                        logger.info("STEP 6b: Applying LLM's revised assignments...")
+                        logger.info("=" * 80)
+
+                        # Get run_id for tracking
+                        import datetime
+                        run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+                        # Log the changes and update recommendations
+                        for account_id, new_csm in revised_assignments.items():
+                            old_csm = assignments.get(account_id)
+                            if old_csm != new_csm:
+                                logger.info(f"  Reassigning {account_id}: {old_csm} -> {new_csm}")
+
+                                # Update the recommendation in the database
+                                automation.update_recommendation_after_llm(
+                                    account_id=account_id,
+                                    new_csm=new_csm,
+                                    original_csm=old_csm,
+                                    llm_feedback=llm_feedback,
+                                    run_id=run_id
+                                )
+
+                        # Use the revised assignments
+                        assignments = revised_assignments
+                        logger.info("✓ Applied LLM's recommended reassignments")
+                    else:
+                        # LLM rejected but didn't provide alternatives - rerun optimization
+                        logger.info("\n" + "=" * 80)
+                        logger.info("STEP 6b: Rerunning optimization with adjusted parameters...")
+                        logger.info("=" * 80)
+
+                        # Exclude CSMs that were problematic
+                        excluded_csms = []
+                        if 'Riley Bond' in [csm for csm in assignments.values()]:
+                            excluded_csms.append('Riley Bond')
+                            logger.info(f"  Excluding Riley Bond (new CSM with too many assignments)")
+
+                        # Rerun optimization with exclusions
+                        if len(resi_corp_df) == 1:
+                            account = resi_corp_df.iloc[0]
+                            csm, score = automation.assign_single_account_optimized(
+                                account, csm_books, excluded_csms=excluded_csms
+                            )
+                            if csm:
+                                assignments = {account['account_id']: csm}
+                        else:
+                            assignments = automation.optimize_batch_with_pulp(
+                                resi_corp_df, csm_books, excluded_csms=excluded_csms
+                            )
+
+                        logger.info(f"✓ Reoptimized assignments completed")
+
+                        # Re-review with LLM (one more time)
+                        should_rerun2, llm_feedback, _ = automation.review_assignments_with_llm(
+                            assignments, resi_corp_df, csm_books
+                        )
+
+                        if should_rerun2:
+                            logger.error("LLM still not satisfied after reoptimization. Manual review required.")
+                            return False
+                else:
+                    # LLM approved - store final recommendations with LLM approval
+                    logger.info("LLM approved the assignments")
+                    import datetime
+                    run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+                    # Store approved recommendations
+                    for account_id, csm in assignments.items():
+                        account_data = resi_corp_df[resi_corp_df['account_id'] == account_id].iloc[0]
+                        automation.store_recommendation(
+                            account_id=account_id,
+                            csm_name=csm,
+                            account_data=account_data,
+                            optimization_score=100,  # High score for LLM approved
+                            method='llm_approved',
+                            run_id=f"{run_id}_approved",
+                            batch_size=len(assignments),
+                            llm_feedback="LLM approved assignment"
+                        )
             else:
                 logger.info("\nLLM review skipped (no API key configured)")
                 llm_feedback = None

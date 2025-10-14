@@ -36,17 +36,25 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def convert_numpy_types(obj):
-    """Convert numpy types to Python types for JSON serialization"""
+    """Convert numpy types and Decimal to Python types for JSON serialization"""
+    from decimal import Decimal
+
     if isinstance(obj, np.integer):
         return int(obj)
     elif isinstance(obj, np.floating):
         return float(obj)
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
+    elif isinstance(obj, Decimal):
+        return float(obj)
     elif isinstance(obj, dict):
         return {k: convert_numpy_types(v) for k, v in obj.items()}
     elif isinstance(obj, list):
         return [convert_numpy_types(item) for item in obj]
+    elif isinstance(obj, pd.Series):
+        return convert_numpy_types(obj.to_dict())
+    elif isinstance(obj, pd.DataFrame):
+        return convert_numpy_types(obj.to_dict('records'))
     else:
         return obj
 
@@ -574,6 +582,51 @@ class CSMRoutingAutomation:
             logger.error(f"Failed to get health distribution for {csm_name}: {str(e)}")
             return {'Red': 0, 'Yellow': 0, 'Green': 0, 'total': 0}
 
+    def update_recommendation_after_llm(self, account_id: str, new_csm: str, original_csm: str,
+                                       llm_feedback: str, run_id: str):
+        """Update recommendation after LLM review with new CSM assignment"""
+        try:
+            cursor = self.snowflake_conn.cursor()
+
+            # Insert a new record showing the LLM-revised assignment
+            insert_query = f"""
+            INSERT INTO {self.recommendations_table} (
+                account_id,
+                recommended_csm,
+                assignment_method,
+                llm_feedback,
+                run_id,
+                was_assigned
+            ) VALUES (
+                '{account_id}',
+                '{new_csm}',
+                'llm_revised',
+                '{llm_feedback}',
+                '{run_id}_revised',
+                TRUE
+            )
+            """
+            cursor.execute(insert_query)
+
+            # Mark the original recommendation as not assigned if CSM changed
+            if new_csm != original_csm:
+                update_query = f"""
+                UPDATE {self.recommendations_table}
+                SET was_assigned = FALSE,
+                    llm_feedback = 'Revised by LLM - reassigned to {new_csm}'
+                WHERE account_id = '{account_id}'
+                    AND recommended_csm = '{original_csm}'
+                    AND run_id = '{run_id}'
+                """
+                cursor.execute(update_query)
+
+            self.snowflake_conn.commit()
+            cursor.close()
+            logger.info(f"Updated recommendation for {account_id}: {original_csm} -> {new_csm}")
+
+        except Exception as e:
+            logger.error(f"Failed to update recommendation after LLM review: {str(e)}")
+
     def store_recommendation(self, account_id: str, csm_name: str, account_data: pd.Series,
                            optimization_score: float, method: str, run_id: str, batch_size: int,
                            llm_feedback: str = None):
@@ -676,7 +729,7 @@ class CSMRoutingAutomation:
             'tad_std': np.std(metrics['tad'])
         }
 
-    def assign_single_account_optimized(self, account: pd.Series, csm_books: Dict) -> Tuple[str, float]:
+    def assign_single_account_optimized(self, account: pd.Series, csm_books: Dict, excluded_csms: list = None) -> Tuple[str, float]:
         """
         Assign single account using optimization logic
         Considers book balance, health score distribution, and recent recommendations
@@ -692,6 +745,11 @@ class CSMRoutingAutomation:
 
         # Get all eligible CSMs (no MT filtering)
         eligible_csms = [csm for csm in self.eligible_csm_list if csm in csm_books]
+
+        # Remove excluded CSMs
+        if excluded_csms:
+            eligible_csms = [csm for csm in eligible_csms if csm not in excluded_csms]
+            logger.info(f"Excluding CSMs: {excluded_csms}")
 
         logger.info(f"Evaluating {len(eligible_csms)} eligible CSMs for account {account.get('account_id')} with health: {account.get('health_segment', 'Unknown')}")
 
@@ -827,7 +885,7 @@ class CSMRoutingAutomation:
 
         return best_csm, best_score
 
-    def optimize_batch_with_pulp(self, accounts_df: pd.DataFrame, csm_books: Dict) -> Dict:
+    def optimize_batch_with_pulp(self, accounts_df: pd.DataFrame, csm_books: Dict, excluded_csms: list = None) -> Dict:
         """
         Use PuLP to optimize batch assignment of multiple accounts
         Includes recency penalty and health score distribution in the objective function
@@ -840,6 +898,11 @@ class CSMRoutingAutomation:
 
         # Get eligible CSMs (all CSMs, no MT filtering)
         eligible_csms = [csm for csm in self.eligible_csm_list if csm in csm_books]
+
+        # Remove excluded CSMs
+        if excluded_csms:
+            eligible_csms = [csm for csm in eligible_csms if csm not in excluded_csms]
+            logger.info(f"Excluding CSMs from batch optimization: {excluded_csms}")
 
         # Get health distributions for all CSMs
         csm_health_dists = {}
@@ -1054,7 +1117,7 @@ class CSMRoutingAutomation:
             try:
                 df = self.execute_query(query)
                 if not df.empty:
-                    performance_data[csm] = df.iloc[0].to_dict()
+                    performance_data[csm] = convert_numpy_types(df.iloc[0].to_dict())
                 else:
                     performance_data[csm] = {
                         'accounts_assigned_30d': 0,
@@ -1231,10 +1294,10 @@ After Assignment:
 {json.dumps(convert_numpy_types(metrics_analysis['projected_health']), indent=2)}
 
 ## HISTORICAL CSM PERFORMANCE (Last 30 Days):
-{json.dumps(historical_data, indent=2)}
+{json.dumps(convert_numpy_types(historical_data), indent=2)}
 
 ## IDENTIFIED CONCERNS:
-{json.dumps(issues, indent=2)}
+{json.dumps(convert_numpy_types(issues), indent=2)}
 
 ## SPECIFIC EVALUATION CRITERIA:
 
