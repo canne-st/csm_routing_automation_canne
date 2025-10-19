@@ -160,8 +160,9 @@ class CSMRoutingAutomation:
 
         # For now, use simplified enrichment query without the complex neediness scoring
         # TODO: Fix recursive CTE error in comprehensive neediness query
+        # FIXED: Added DISTINCT to prevent duplicate records
         enrichment_query = f"""
-        SELECT
+        SELECT DISTINCT
             account_id_ob as account_id,
             COALESCE(tenant_name, 'Unknown Tenant') as tenantname,
             tenant_id as tenantid,
@@ -217,6 +218,13 @@ class CSMRoutingAutomation:
             enriched['segment'] = enriched['segment'].fillna('Residential')
             enriched['account_level'] = enriched['account_level'].fillna('Corporate')
             enriched['neediness_category'] = enriched['neediness_category'].fillna('Low')
+
+        # FIXED: Deduplicate by account_id to prevent multiple records for same account
+        if not enriched.empty:
+            original_count = len(enriched)
+            enriched = enriched.drop_duplicates(subset=['account_id'], keep='first')
+            if original_count > len(enriched):
+                logger.info(f"Removed {original_count - len(enriched)} duplicate records during enrichment")
 
         logger.info(f"Enriched {len(enriched)} accounts with comprehensive neediness data")
         return enriched
@@ -633,6 +641,23 @@ class CSMRoutingAutomation:
         """Store a CSM recommendation in the database"""
         try:
             cursor = self.snowflake_conn.cursor()
+
+            # FIXED: Check if a recommendation already exists for this account in this run
+            check_query = f"""
+            SELECT COUNT(*) as count
+            FROM {self.recommendations_table}
+            WHERE account_id = '{account_id}'
+              AND run_id = '{run_id}'
+              AND assignment_method = '{method}'
+            """
+
+            cursor.execute(check_query)
+            result = cursor.fetchone()
+
+            if result and result[0] > 0:
+                logger.debug(f"Recommendation already exists for account {account_id} in run {run_id}, skipping duplicate")
+                cursor.close()
+                return
 
             insert_query = f"""
             INSERT INTO {self.recommendations_table} (
@@ -1549,11 +1574,18 @@ Be specific and actionable. Default to approval unless there are clear, signific
                 (enriched_df['account_level'] == 'Corporate')
             ]
 
+            # FIXED: Ensure no duplicate account_ids before final processing
+            if not resi_corp_df.empty:
+                original_count = len(resi_corp_df)
+                resi_corp_df = resi_corp_df.drop_duplicates(subset=['account_id'], keep='first')
+                if original_count > len(resi_corp_df):
+                    logger.info(f"Removed {original_count - len(resi_corp_df)} duplicate Residential Corporate accounts")
+
             if resi_corp_df.empty:
                 logger.info("No Residential Corporate accounts need assignment")
                 return
 
-            logger.info(f"Processing {len(resi_corp_df)} Residential Corporate accounts")
+            logger.info(f"Processing {len(resi_corp_df)} unique Residential Corporate accounts")
 
             # Get current CSM books
             csm_books = self.get_current_csm_books()

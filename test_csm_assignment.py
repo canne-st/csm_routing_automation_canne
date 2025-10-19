@@ -165,7 +165,12 @@ def test_single_account():
         logger.info("=" * 80)
 
         # Process all accounts for testing
-        resi_corp_df = enriched_df
+        # FIXED: Ensure no duplicate account_ids before processing
+        resi_corp_df = enriched_df.drop_duplicates(subset=['account_id'], keep='first')
+        if len(enriched_df) > len(resi_corp_df):
+            logger.info(f"Removed {len(enriched_df) - len(resi_corp_df)} duplicate records before processing")
+
+        logger.info(f"Processing {len(resi_corp_df)} unique accounts for assignment")
 
         assignments = {}
 
