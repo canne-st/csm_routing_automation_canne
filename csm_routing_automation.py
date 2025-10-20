@@ -11,8 +11,7 @@ import pandas as pd
 import numpy as np
 import pulp
 import json
-import datetime
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
 import snowflake.connector
 from sqlalchemy import create_engine
@@ -78,6 +77,141 @@ class CSMRoutingAutomation:
         else:
             self.claude_client = None
             logger.warning("No Anthropic API key found in config - LLM review will be skipped")
+
+        # Session cache for neediness data - will be populated on first use
+        self.neediness_cache = None
+        self.cache_timestamp = None
+
+    def populate_neediness_cache(self):
+        """
+        Run the neediness query ONCE for ALL accounts and cache results.
+        This is called on-demand when enrichment is needed.
+        """
+        if self.neediness_cache is not None:
+            logger.info("Neediness cache already populated, skipping query")
+            return True
+
+        logger.info("Populating neediness cache by running full query...")
+
+        try:
+            # Try different query options in order of preference
+            query = None
+            query_source = None
+
+            # Option 1: Try simplified query that should work
+            import os
+            if os.path.exists('neediness_scoring_simple.sql'):
+                with open('neediness_scoring_simple.sql', 'r') as f:
+                    query = f.read()
+                    query_source = "simplified query"
+            # Option 2: Try comprehensive query (likely has errors)
+            elif os.path.exists('neediness_scoring_query.sql'):
+                with open('neediness_scoring_query.sql', 'r') as f:
+                    query = f.read()
+                    query_source = "comprehensive query"
+            else:
+                # Option 3: Use a basic working query that combines onboarding and health data
+                query = """
+                WITH all_accounts AS (
+                    -- Get accounts from onboarding view
+                    SELECT DISTINCT
+                        account_id_ob as account_id,
+                        tenant_id,
+                        tenant_name as account_name
+                    FROM DSV_SHARE.PUBLIC.VW_ONBOARDING_DETAIL
+                    WHERE account_id_ob IS NOT NULL
+                    LIMIT 5000
+                ),
+                health_data AS (
+                    -- Get latest health scores
+                    SELECT
+                        account_id,
+                        core_health_score,
+                        core_health_score_color
+                    FROM DSV_WAREHOUSE.POST_SALES.VW_CUSTOMER_HISTORY_DAILY
+                    WHERE is_current = TRUE
+                        AND account_id IS NOT NULL
+                )
+                SELECT
+                    a.account_id,
+                    a.account_name,
+                    a.tenant_id,
+                    COALESCE(h.core_health_score, 70) as health_score,
+                    COALESCE(h.core_health_score_color, 'Yellow') as health_segment,
+                    100000 as revenue,  -- Default revenue
+
+                    -- Calculate neediness score based on health
+                    CASE
+                        WHEN h.core_health_score_color = 'Red' THEN 8
+                        WHEN h.core_health_score_color = 'Yellow' THEN 5
+                        WHEN h.core_health_score_color = 'Green' THEN 3
+                        ELSE 5
+                    END as neediness_score,
+
+                    -- Default values
+                    'Residential' as segment,
+                    'Corporate' as account_level,
+                    'Roofing' as industry,
+                    0 as tad_score,
+                    5 as tech_count,
+                    CASE
+                        WHEN h.core_health_score_color = 'Red' THEN 'High'
+                        WHEN h.core_health_score_color = 'Yellow' THEN 'Medium'
+                        WHEN h.core_health_score_color = 'Green' THEN 'Low'
+                        ELSE 'Medium'
+                    END as neediness_category
+
+                FROM all_accounts a
+                LEFT JOIN health_data h ON a.account_id = h.account_id
+                """
+                query_source = "fallback query"
+
+            logger.info(f"Using {query_source} to populate cache")
+            start_time = datetime.now()
+
+            # Execute the query
+            self.neediness_cache = self.execute_query(query)
+
+            if self.neediness_cache.empty:
+                logger.warning("Neediness query returned no data, using empty cache")
+                self.neediness_cache = pd.DataFrame()
+                return False
+
+            # Standardize column names
+            self.neediness_cache.columns = [
+                col.lower().replace(' ', '_').replace('-', '_')
+                for col in self.neediness_cache.columns
+            ]
+
+            # Ensure account_id is string
+            if 'account_id' in self.neediness_cache.columns:
+                self.neediness_cache['account_id'] = self.neediness_cache['account_id'].astype(str)
+
+            elapsed = (datetime.now() - start_time).total_seconds()
+            logger.info(f"Cache populated with {len(self.neediness_cache)} accounts in {elapsed:.2f} seconds")
+
+            # Show statistics
+            if 'neediness_score' in self.neediness_cache.columns:
+                logger.info(f"Neediness distribution: {self.neediness_cache['neediness_score'].value_counts().to_dict()}")
+            if 'health_segment' in self.neediness_cache.columns:
+                logger.info(f"Health distribution: {self.neediness_cache['health_segment'].value_counts().to_dict()}")
+
+            self.cache_timestamp = datetime.now()
+
+            # Optionally save to CSV for debugging/backup
+            try:
+                cache_file = f"neediness_cache_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                self.neediness_cache.to_csv(cache_file, index=False)
+                logger.info(f"Saved cache to {cache_file} for reference")
+            except:
+                pass  # Optional save, don't fail if it doesn't work
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to populate neediness cache: {str(e)}")
+            self.neediness_cache = pd.DataFrame()  # Use empty DataFrame as fallback
+            return False
 
     def load_config(self, filepath):
         """Load configuration from JSON file"""
@@ -156,38 +290,120 @@ class CSMRoutingAutomation:
             return accounts_df
 
         # Now columns should be lowercase after standardization
-        account_ids = "','".join(accounts_df['account_id'].astype(str).tolist())
+        account_ids_list = accounts_df['account_id'].astype(str).tolist()
+        account_ids = "','".join(account_ids_list)
 
-        # For now, use simplified enrichment query without the complex neediness scoring
-        # TODO: Fix recursive CTE error in comprehensive neediness query
-        # FIXED: Added DISTINCT to prevent duplicate records
-        enrichment_query = f"""
-        SELECT DISTINCT
-            account_id_ob as account_id,
-            COALESCE(tenant_name, 'Unknown Tenant') as tenantname,
-            tenant_id as tenantid,
-            account_id_ob as ultimate_parent_account_c,
-            COALESCE(tenant_name, 'Unknown Tenant') as ultimate_parent_account_name,
-            '' as responsible_csm,  -- This view doesn't have CSM info
-            'Residential' as segment,
-            'Corporate' as account_level,
-            'Roofing' as industry,
-            0 as tad_score,
-            70 as health_score,
-            'Yellow' as health_segment,
-            5 as tech_count,
-            100000 as revenue,
-            5 as neediness_score,
-            'Low' as neediness_category,
-            'Not at risk' as churn_stage,
-            'US/Pacific' as timezone,
-            0 as is_parent_account,
-            0 as related_tenants
-        FROM DSV_SHARE.PUBLIC.VW_ONBOARDING_DETAIL
-        WHERE account_id_ob IN ('{account_ids}')
-        """
+        # FIRST: Populate cache if not already done (run query ONCE for all accounts)
+        if self.neediness_cache is None:
+            logger.info("First enrichment request - populating neediness cache...")
+            self.populate_neediness_cache()
 
-        enriched_data = self.execute_query(enrichment_query)
+        # SECOND: Use cached data to filter for requested accounts
+        if self.neediness_cache is not None and not self.neediness_cache.empty:
+            try:
+                logger.info(f"Using cached neediness data for {len(account_ids_list)} accounts")
+
+                # Filter cache for the requested accounts
+                enriched_data = self.neediness_cache[
+                    self.neediness_cache['account_id'].isin(account_ids_list)
+                ].copy()
+
+                if not enriched_data.empty:
+                    logger.info(f"Found {len(enriched_data)} accounts in cache")
+
+                    # Merge with original accounts_df to maintain all accounts
+                    enriched = accounts_df.merge(enriched_data, on='account_id', how='left')
+
+                    # Show sample of enriched data
+                    if len(enriched) > 0 and 'neediness_score' in enriched.columns:
+                        sample = enriched.iloc[0]
+                        logger.info(f"Sample enriched account - Neediness: {sample.get('neediness_score')}, "
+                                  f"Health: {sample.get('health_score')}, Revenue: {sample.get('revenue')}")
+
+                    # Fill any missing accounts with defaults
+                    self._fill_missing_enrichment_data(enriched)
+
+                    # Deduplicate
+                    original_count = len(enriched)
+                    enriched = enriched.drop_duplicates(subset=['account_id'], keep='first')
+                    if original_count > len(enriched):
+                        logger.info(f"Removed {original_count - len(enriched)} duplicate records")
+
+                    logger.info(f"Successfully enriched {len(enriched)} accounts from cache")
+                    return enriched
+
+                else:
+                    logger.warning(f"No accounts found in cache for IDs: {account_ids_list[:3]}...")
+
+            except Exception as e:
+                logger.warning(f"Failed to use cached data: {str(e)}, trying live query")
+
+        # SECOND: Try to use the comprehensive neediness scoring query
+        try:
+            # Load the comprehensive neediness query
+            neediness_query_template = self.get_neediness_query_template()
+
+            # If we got the fallback query (starts with SELECT account_id), use hardcoded
+            if neediness_query_template.strip().startswith('SELECT\n                    account_id,'):
+                logger.info("Using fallback query template, reverting to simplified enrichment")
+                raise Exception("Fallback template detected")
+
+            # Add account_id filter to the WHERE clause
+            # The query has WHERE 1=1, so we can safely add AND condition
+            enrichment_query = neediness_query_template.replace(
+                'WHERE 1=1',
+                f"WHERE 1=1\n    AND account_id IN ('{account_ids}')"
+            )
+
+            logger.info("Attempting to use comprehensive neediness scoring query")
+            enriched_data = self.execute_query(enrichment_query)
+
+            if not enriched_data.empty:
+                # Standardize column names to lowercase
+                enriched_data.columns = [col.lower().replace(' ', '_').replace('-', '_') for col in enriched_data.columns]
+
+                # Ensure we have the required columns
+                required_cols = ['account_id', 'neediness_score', 'health_score', 'segment', 'account_level']
+                missing_cols = [col for col in required_cols if col not in enriched_data.columns]
+
+                if missing_cols:
+                    logger.warning(f"Comprehensive query missing columns: {missing_cols}, reverting to simplified")
+                    raise Exception(f"Missing required columns: {missing_cols}")
+
+                logger.info("Successfully used comprehensive neediness scoring query")
+
+        except Exception as e:
+            logger.warning(f"Failed to use comprehensive neediness query: {str(e)}, falling back to simplified")
+
+            # Fallback to simplified enrichment query with hardcoded values
+            # FIXED: Added DISTINCT to prevent duplicate records
+            enrichment_query = f"""
+            SELECT DISTINCT
+                account_id_ob as account_id,
+                COALESCE(tenant_name, 'Unknown Tenant') as tenantname,
+                tenant_id as tenantid,
+                account_id_ob as ultimate_parent_account_c,
+                COALESCE(tenant_name, 'Unknown Tenant') as ultimate_parent_account_name,
+                '' as responsible_csm,  -- This view doesn't have CSM info
+                'Residential' as segment,
+                'Corporate' as account_level,
+                'Roofing' as industry,
+                0 as tad_score,
+                70 as health_score,
+                'Yellow' as health_segment,
+                5 as tech_count,
+                100000 as revenue,
+                5 as neediness_score,
+                'Low' as neediness_category,
+                'Not at risk' as churn_stage,
+                'US/Pacific' as timezone,
+                0 as is_parent_account,
+                0 as related_tenants
+            FROM DSV_SHARE.PUBLIC.VW_ONBOARDING_DETAIL
+            WHERE account_id_ob IN ('{account_ids}')
+            """
+
+            enriched_data = self.execute_query(enrichment_query)
 
         # Standardize column names to lowercase
         if not enriched_data.empty:
@@ -228,6 +444,53 @@ class CSMRoutingAutomation:
 
         logger.info(f"Enriched {len(enriched)} accounts with comprehensive neediness data")
         return enriched
+
+    def _fill_missing_enrichment_data(self, df: pd.DataFrame):
+        """Fill missing values in enrichment data with defaults"""
+        if 'neediness_score' in df.columns:
+            df['neediness_score'] = df['neediness_score'].fillna(5)
+        else:
+            df['neediness_score'] = 5
+
+        if 'tad_score' in df.columns:
+            df['tad_score'] = df['tad_score'].fillna(0)
+        else:
+            df['tad_score'] = 0
+
+        if 'health_score' in df.columns:
+            df['health_score'] = df['health_score'].fillna(70)
+        else:
+            df['health_score'] = 70
+
+        if 'revenue' in df.columns:
+            df['revenue'] = df['revenue'].fillna(100000)
+        else:
+            df['revenue'] = 100000
+
+        if 'tech_count' in df.columns:
+            df['tech_count'] = df['tech_count'].fillna(5)
+        else:
+            df['tech_count'] = 5
+
+        if 'segment' in df.columns:
+            df['segment'] = df['segment'].fillna('Residential')
+        else:
+            df['segment'] = 'Residential'
+
+        if 'account_level' in df.columns:
+            df['account_level'] = df['account_level'].fillna('Corporate')
+        else:
+            df['account_level'] = 'Corporate'
+
+        if 'neediness_category' in df.columns:
+            df['neediness_category'] = df['neediness_category'].fillna('Low')
+        else:
+            df['neediness_category'] = 'Low'
+
+        if 'health_segment' in df.columns:
+            df['health_segment'] = df['health_segment'].fillna('Yellow')
+        else:
+            df['health_segment'] = 'Yellow'
 
     def get_neediness_query_template(self) -> str:
         """Returns the full neediness scoring query template"""
