@@ -1025,7 +1025,7 @@ class CSMRoutingAutomation:
         """
         best_csm = None
         best_score = float('inf')
-        run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # Get eligible CSMs based on account segment and level
         segment_level = f"{account.get('segment', 'Residential').lower().replace(' & construction', '').replace(' ', '_')}_{account.get('account_level', 'Corporate').lower()}"
@@ -1179,7 +1179,7 @@ class CSMRoutingAutomation:
         Includes recency penalty and health score distribution in the objective function
         """
         logger.info(f"Starting PuLP optimization for {len(accounts_df)} accounts")
-        run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # Initialize the optimization problem
         prob = pulp.LpProblem("CSM_Batch_Assignment", pulp.LpMinimize)
@@ -1860,7 +1860,7 @@ Be specific and actionable. Default to approval unless there are clear, signific
             max_retries = 2  # Maximum number of retries based on LLM feedback
             retry_count = 0
             llm_feedback = None
-            run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
             while retry_count <= max_retries:
                 # Clear previous assignments if this is a retry
@@ -1959,7 +1959,7 @@ Be specific and actionable. Default to approval unless there are clear, signific
 
         # Log recent assignment history
         recent_1h = sum(1 for a in self.assignment_history
-                       if a['timestamp'] >= datetime.datetime.now() - timedelta(hours=1))
+                       if a['timestamp'] >= datetime.now() - timedelta(hours=1))
         recent_24h = len(self.assignment_history)
         logger.info(f"Recent assignments: {recent_1h} in last hour, {recent_24h} in last 24 hours")
 
