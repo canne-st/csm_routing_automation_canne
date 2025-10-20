@@ -657,8 +657,13 @@ class CSMRoutingAutomation:
             logger.error(f"Failed to get CSM tenure data: {str(e)}")
             return {}
 
-    def get_current_csm_books(self) -> Dict:
-        """Get current CSM book assignments and metrics"""
+    def get_current_csm_books(self, min_account_threshold: int = 5) -> Dict:
+        """Get current CSM book assignments and metrics
+
+        Args:
+            min_account_threshold: Minimum number of accounts a CSM must have to be eligible.
+                                 CSMs with fewer accounts may be from different segments or have data issues.
+        """
 
         # Get active CSMs and managers from Workday
         active_csms_workday, managers_to_exclude = self.get_active_csms_and_managers_from_workday()
@@ -743,16 +748,46 @@ class CSMRoutingAutomation:
                     'tenure_days': tenure_info.get('tenure_days', 180)
                 }
 
-        # Update the eligible CSM list from actual data
-        # These are CSMs who have current Residential Corporate assignments and are not managers
-        self.eligible_csm_list = list(csm_books.keys())
+        # Filter out CSMs with too few accounts (likely from different segments or data issues)
+        excluded_csms = {}
+        filtered_csm_books = {}
+
+        for csm, data in csm_books.items():
+            if data['count'] < min_account_threshold:
+                excluded_csms[csm] = {
+                    'count': data['count'],
+                    'reason': f'Below minimum threshold ({data["count"]} < {min_account_threshold})',
+                    'likely_issue': 'Different segment, new CSM, or data quality issue'
+                }
+            else:
+                filtered_csm_books[csm] = data
+
+        # Log excluded CSMs
+        if excluded_csms:
+            logger.warning(f"Excluding {len(excluded_csms)} CSMs with < {min_account_threshold} accounts:")
+            for csm, info in excluded_csms.items():
+                logger.warning(f"  - {csm}: {info['count']} accounts - {info['likely_issue']}")
+
+        # Check if we have enough eligible CSMs left
+        if len(filtered_csm_books) < 3:
+            logger.warning(f"Only {len(filtered_csm_books)} eligible CSMs after filtering. Consider lowering threshold.")
+            # In extreme cases, use all CSMs with at least 1 account
+            if len(filtered_csm_books) == 0:
+                logger.error("No eligible CSMs after filtering! Using all CSMs with assignments.")
+                filtered_csm_books = csm_books
+
+        # Update the eligible CSM list from filtered data
+        # These are CSMs who have current Residential Corporate assignments, are not managers,
+        # and have at least the minimum number of accounts
+        self.eligible_csm_list = list(filtered_csm_books.keys())
 
         logger.info(f"Retrieved book data for {len(csm_books)} CSMs")
+        logger.info(f"After filtering (>= {min_account_threshold} accounts): {len(filtered_csm_books)} eligible CSMs")
         logger.info(f"Active CSMs from Workday: {len(active_csms_workday)}")
         logger.info(f"Managers to exclude: {', '.join(managers_to_exclude) if managers_to_exclude else 'None'}")
         logger.info(f"Eligible CSMs for assignment: {', '.join(self.eligible_csm_list)}")
 
-        return csm_books
+        return filtered_csm_books
 
     def create_recommendations_table(self):
         """Create the recommendations tracking table if it doesn't exist"""
@@ -1850,8 +1885,9 @@ Be specific and actionable. Default to approval unless there are clear, signific
 
             logger.info(f"Processing {len(resi_corp_df)} unique Residential Corporate accounts")
 
-            # Get current CSM books
-            csm_books = self.get_current_csm_books()
+            # Get current CSM books with minimum account threshold from configuration
+            min_accounts = self.limits.get('residential_corporate', {}).get('min_accounts_for_eligibility', 5)
+            csm_books = self.get_current_csm_books(min_account_threshold=min_accounts)
 
             # Create recommendations table if it doesn't exist
             self.create_recommendations_table()

@@ -1,18 +1,22 @@
 {
     "residential_corporate": {
         "max_accounts_per_csm": 85,
-        "cooling_period_hours": 4
+        "cooling_period_hours": 4,
+        "min_accounts_for_eligibility": 5
     },
     "residential_enterprise": {
         "max_accounts_per_csm": 40,
-        "cooling_period_hours": 6
+        "cooling_period_hours": 6,
+        "min_accounts_for_eligibility": 3
     },
     "commercial_corporate": {
         "max_accounts_per_csm": 70,
-        "cooling_period_hours": 4
+        "cooling_period_hours": 4,
+        "min_accounts_for_eligibility": 5
     },
     "commercial_enterprise": {
         "max_accounts_per_csm": 35,
-        "cooling_period_hours": 6
+        "cooling_period_hours": 6,
+        "min_accounts_for_eligibility": 3
     }
 }

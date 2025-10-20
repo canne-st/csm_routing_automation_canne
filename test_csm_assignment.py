@@ -125,7 +125,9 @@ def test_single_account():
         logger.info("STEP 3: Getting current CSM book data...")
         logger.info("=" * 80)
 
-        csm_books = automation.get_current_csm_books()
+        # Use minimum account threshold from configuration
+        min_accounts = automation.limits.get('residential_corporate', {}).get('min_accounts_for_eligibility', 5)
+        csm_books = automation.get_current_csm_books(min_account_threshold=min_accounts)
 
         if not csm_books:
             logger.error("No CSM books found")

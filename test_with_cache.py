@@ -72,7 +72,9 @@ def test_with_cache():
 
         # Get CSM books
         logger.info("\n=== Getting CSM Books ===")
-        csm_books = automation.get_current_csm_books()
+        # Use minimum account threshold from configuration
+        min_accounts = automation.limits.get('residential_corporate', {}).get('min_accounts_for_eligibility', 5)
+        csm_books = automation.get_current_csm_books(min_account_threshold=min_accounts)
 
         if not csm_books:
             logger.error("No CSM books found")
