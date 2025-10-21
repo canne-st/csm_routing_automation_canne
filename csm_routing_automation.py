@@ -575,7 +575,7 @@ class CSMRoutingAutomation:
                         QUALIFY rn = 1
                     )
                     WHERE active_status = TRUE
-                        AND LOWER(BUSINESS_TITLE) LIKE '%manager%customer success management'
+                        and (lower(BUSINESS_TITLE) like '%manager%customer success%')
                         AND LOWER(company) NOT LIKE '%aspire%'
                         AND DATEDIFF(day, week_end_date::DATE, CURRENT_DATE) < 30
                     ORDER BY PREFERRED_FULL_NAME
