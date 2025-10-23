@@ -604,6 +604,7 @@ class CSMRoutingAutomation:
                 )
             """
             unfiltered_df = self.execute_query(unfiltered_query)
+            unfiltered_df.columns = [col.lower() for col in unfiltered_df.columns]
             total_workday_csms = unfiltered_df['total_csms'].iloc[0] if not unfiltered_df.empty else 0
 
             # Now get the filtered results
@@ -729,6 +730,7 @@ class CSMRoutingAutomation:
             AND preferred_csm_name IS NOT NULL
         """
         unfiltered_df = self.execute_query(unfiltered_books_query)
+        unfiltered_df.columns = [col.lower() for col in unfiltered_df.columns]
         total_csms_with_books = unfiltered_df['total_csms'].iloc[0] if not unfiltered_df.empty else 0
 
         df = self.execute_query(query)
