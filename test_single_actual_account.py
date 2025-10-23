@@ -57,9 +57,22 @@ def test_single_account():
             account_id_ob as account_id,
             tenant_id,
             success_transition_status_ob
-        FROM DSV_SHARE.PUBLIC.VW_ONBOARDING_DETAIL
+        FROM DSV_SHARE.PUBLIC.VW_ONBOARDING_DETAIL o
         WHERE success_transition_status_ob = 'Needs CSM'
             AND account_id_ob IS NOT NULL
+            -- EXCLUDE accounts that already have recommendations today
+            AND NOT EXISTS (
+                SELECT 1
+                FROM DSV_WAREHOUSE.DATA_SCIENCE.CSM_ROUTING_RECOMMENDATIONS_CANNE r
+                WHERE r.account_id = o.account_id_ob
+                AND DATE(r.recommendation_timestamp) = CURRENT_DATE()
+            )
+            -- EXCLUDE accounts that are already assigned
+            AND NOT EXISTS (
+                SELECT 1
+                FROM DSV_WAREHOUSE.DATA_SCIENCE.ACCOUNT_CSM_ASSIGNMENTS_CANNE a
+                WHERE a.account_id = o.account_id_ob
+            )
         LIMIT 1
         """
 
