@@ -108,21 +108,21 @@ def test_single_account():
 
             # Try to find a Residential Corporate account
             query = """
-            WITH enriched AS (
-                SELECT
-                    o.account_id_ob as account_id,
-                    o.tenant_id,
-                    o.success_transition_status_ob,
-                    COALESCE(o.segment, 'Residential') as segment,
-                    COALESCE(o.account_level, 'Corporate') as account_level
-                FROM DSV_SHARE.PUBLIC.VW_ONBOARDING_DETAIL o
-                WHERE o.success_transition_status_ob = 'Needs CSM'
-                    AND o.account_id_ob IS NOT NULL
-            )
-            SELECT *
-            FROM enriched
-            WHERE segment = 'Residential'
-                AND account_level = 'Corporate'
+            SELECT
+                account_id_ob as account_id,
+                tenant_id,
+                success_transition_status_ob,
+                'Residential' as segment,
+                'Corporate' as account_level
+            FROM DSV_SHARE.PUBLIC.VW_ONBOARDING_DETAIL
+            WHERE success_transition_status_ob = 'Needs CSM'
+                AND account_id_ob IS NOT NULL
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM DSV_WAREHOUSE.DATA_SCIENCE.CSM_ROUTING_RECOMMENDATIONS_CANNE r
+                    WHERE r.account_id = account_id_ob
+                    AND DATE(r.recommendation_timestamp) = CURRENT_DATE()
+                )
             LIMIT 1
             """
 

@@ -509,7 +509,14 @@ class CSMRoutingAutomation:
         # Use the cached neediness data to build CSM books
         logger.info("Building CSM books from cached neediness data...")
 
-        # Filter for Residential Corporate accounts with CSMs
+        # Get ALL accounts with CSMs (not just Residential Corporate)
+        # This ensures we count total workload for capacity checking
+        all_accounts_df = self.neediness_cache[
+            (self.neediness_cache.get('responsible_csm', '').notna()) &
+            (self.neediness_cache.get('responsible_csm', '') != '')
+        ].copy()
+
+        # But also get Residential Corporate subset for segment-specific metrics
         df = self.neediness_cache[
             (self.neediness_cache.get('segment', 'Residential') == 'Residential') &
             (self.neediness_cache.get('account_level', 'Corporate') == 'Corporate') &
@@ -541,9 +548,11 @@ class CSMRoutingAutomation:
 
         # Filter by active CSMs from resi_corp_active_csms
         df = df[df[csm_col].isin(active_csms_filter)]
+        all_accounts_df = all_accounts_df[all_accounts_df[csm_col].isin(active_csms_filter)]
 
         # Rename CSM column to standard name for consistency
         df = df.rename(columns={csm_col: 'csm_name'})
+        all_accounts_df = all_accounts_df.rename(columns={csm_col: 'responsible_csm'})
 
         # Check if dataframe is empty
         if df.empty:
@@ -572,7 +581,10 @@ class CSMRoutingAutomation:
 
                 csm_df = df[df['csm_name'] == csm]
 
-                # Get health segment distribution
+                # Get TOTAL account count across ALL segments for capacity checking
+                total_accounts = all_accounts_df[all_accounts_df['responsible_csm'] == csm]['account_id'].nunique()
+
+                # Get health segment distribution (for Residential Corporate only)
                 health_dist = csm_df['health_segment'].value_counts().to_dict() if 'health_segment' in csm_df.columns else {}
 
                 # Get tenure information
@@ -584,7 +596,8 @@ class CSMRoutingAutomation:
 
                 csm_books[csm] = {
                     'accounts': csm_df.to_dict('records'),
-                    'count': len(csm_df),
+                    'count': total_accounts,  # Use TOTAL count for capacity checking
+                    'resi_corp_count': len(csm_df),  # Keep segment-specific count for reference
                     'total_neediness': csm_df['neediness_score'].fillna(0).sum() if 'neediness_score' in csm_df.columns else len(csm_df) * 5,
                     'total_revenue': csm_df['total_mrr'].fillna(0).sum() if 'total_mrr' in csm_df.columns else len(csm_df) * 100000,
                     'total_tad': csm_df['tad_score'].fillna(0).sum() if 'tad_score' in csm_df.columns else 0,
