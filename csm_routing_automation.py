@@ -528,7 +528,7 @@ class CSMRoutingAutomation:
             """
 
     def get_active_csms_and_managers_from_workday(self) -> Tuple[List[str], List[str]]:
-        """Get list of active CSMs and their managers from Workday"""
+        """Get list of active CSMs and their managers from Workday, filtered by resi_corp_active_csms table"""
         query = """
         WITH cte AS (
             SELECT PREFERRED_FULL_NAME,
@@ -538,53 +538,75 @@ class CSMRoutingAutomation:
             GROUP BY PREFERRED_FULL_NAME, full_name
             HAVING COUNT(DISTINCT active_status) = 1
             ORDER BY full_name
+        ),
+        workday_csms AS (
+            SELECT DISTINCT
+                CONCAT(legal_first_name, ' ', legal_last_name) AS CSM,
+                manager_name AS Manager
+            FROM (
+                SELECT *
+                FROM DSV_WAREHOUSE.PUBLIC.FACT_WDAY_EMPLOYEE_WEEKLY_HISTORY
+                WHERE 1=1
+                    AND job_title ILIKE '%customer success manager%'
+                    AND active_status = TRUE
+                    AND week_end_date IN (
+                        SELECT MAX(week_end_date)
+                        FROM DSV_WAREHOUSE.PUBLIC.FACT_WDAY_EMPLOYEE_WEEKLY_HISTORY
+                    )
+                    AND manager_name IN (
+                        SELECT DISTINCT PREFERRED_FULL_NAME
+                        FROM (
+                            SELECT DISTINCT
+                                h.PREFERRED_FULL_NAME,
+                                CONCAT(h.legal_first_name, ' ', h.legal_last_name) AS full_name,
+                                h.legal_first_name,
+                                h.legal_last_name,
+                                h.company,
+                                h.business_title,
+                                h.active_status,
+                                h.load_date,
+                                h.week_end_date,
+                                ROW_NUMBER() OVER(
+                                    PARTITION BY CONCAT(h.legal_first_name, ' ', h.legal_last_name)
+                                    ORDER BY h.load_date DESC, h.effective_date_for_current_position DESC
+                                ) AS rn
+                            FROM DSV_WAREHOUSE.PUBLIC.FACT_WDAY_EMPLOYEE_WEEKLY_HISTORY h
+                            JOIN cte ON cte.full_name = CONCAT(h.legal_first_name, ' ', h.legal_last_name)
+                            WHERE h.load_date IS NOT NULL
+                            QUALIFY rn = 1
+                        )
+                        WHERE active_status = TRUE
+                            and (lower(BUSINESS_TITLE) like '%manager%customer success%')
+                            AND LOWER(company) NOT LIKE '%aspire%'
+                            AND DATEDIFF(day, week_end_date::DATE, CURRENT_DATE) < 30
+                        ORDER BY PREFERRED_FULL_NAME
+                    )
+                ORDER BY MANAGER_NAME, legal_first_name
+            )
         )
-        SELECT DISTINCT
-            CONCAT(legal_first_name, ' ', legal_last_name) AS CSM,
-            manager_name AS Manager
-        FROM (
-            SELECT *
+        -- Filter by resi_corp_active_csms table to only include eligible CSMs
+        SELECT w.CSM, w.Manager
+        FROM workday_csms w
+        INNER JOIN DSV_WAREHOUSE.DATA_SCIENCE.resi_corp_active_csms r
+            ON w.CSM = r.active_csm
+        """
+
+        try:
+            # First get the unfiltered count for logging
+            unfiltered_query = """
+            SELECT COUNT(DISTINCT CONCAT(legal_first_name, ' ', legal_last_name)) as total_csms
             FROM DSV_WAREHOUSE.PUBLIC.FACT_WDAY_EMPLOYEE_WEEKLY_HISTORY
-            WHERE 1=1
-                AND job_title ILIKE '%customer success manager%'
+            WHERE job_title ILIKE '%customer success manager%'
                 AND active_status = TRUE
                 AND week_end_date IN (
                     SELECT MAX(week_end_date)
                     FROM DSV_WAREHOUSE.PUBLIC.FACT_WDAY_EMPLOYEE_WEEKLY_HISTORY
                 )
-                AND manager_name IN (
-                    SELECT DISTINCT PREFERRED_FULL_NAME
-                    FROM (
-                        SELECT DISTINCT
-                            h.PREFERRED_FULL_NAME,
-                            CONCAT(h.legal_first_name, ' ', h.legal_last_name) AS full_name,
-                            h.legal_first_name,
-                            h.legal_last_name,
-                            h.company,
-                            h.business_title,
-                            h.active_status,
-                            h.load_date,
-                            h.week_end_date,
-                            ROW_NUMBER() OVER(
-                                PARTITION BY CONCAT(h.legal_first_name, ' ', h.legal_last_name)
-                                ORDER BY h.load_date DESC, h.effective_date_for_current_position DESC
-                            ) AS rn
-                        FROM DSV_WAREHOUSE.PUBLIC.FACT_WDAY_EMPLOYEE_WEEKLY_HISTORY h
-                        JOIN cte ON cte.full_name = CONCAT(h.legal_first_name, ' ', h.legal_last_name)
-                        WHERE h.load_date IS NOT NULL
-                        QUALIFY rn = 1
-                    )
-                    WHERE active_status = TRUE
-                        and (lower(BUSINESS_TITLE) like '%manager%customer success%')
-                        AND LOWER(company) NOT LIKE '%aspire%'
-                        AND DATEDIFF(day, week_end_date::DATE, CURRENT_DATE) < 30
-                    ORDER BY PREFERRED_FULL_NAME
-                )
-            ORDER BY MANAGER_NAME, legal_first_name
-        )
-        """
+            """
+            unfiltered_df = self.execute_query(unfiltered_query)
+            total_workday_csms = unfiltered_df['total_csms'].iloc[0] if not unfiltered_df.empty else 0
 
-        try:
+            # Now get the filtered results
             df = self.execute_query(query)
             if not df.empty:
                 # Standardize column names to lowercase
@@ -604,10 +626,13 @@ class CSMRoutingAutomation:
                     managers = []
                     logger.warning("Manager column not found in Workday query")
 
-                logger.info(f"Retrieved {len(active_csms)} active CSMs and {len(managers)} managers from Workday")
+                logger.info(f"Retrieved {len(active_csms)} active CSMs from Workday (filtered by resi_corp_active_csms table)")
+                logger.info(f"Filtered out {total_workday_csms - len(active_csms)} CSMs who are not in resi_corp_active_csms")
+                logger.info(f"Retrieved {len(managers)} managers from filtered CSMs")
                 return active_csms, managers
             else:
-                logger.warning("No CSM data retrieved from Workday")
+                logger.warning("No CSM data retrieved after filtering by resi_corp_active_csms table")
+                logger.info(f"Total CSMs in Workday before filtering: {total_workday_csms}")
                 return [], []
         except Exception as e:
             logger.warning(f"Failed to get CSM data from Workday: {str(e)}. Using empty lists.")
@@ -673,10 +698,11 @@ class CSMRoutingAutomation:
 
         # Query current CSM book assignments from customer history daily
         # Simplified query without column filters that might not exist
+        # Now filtered by resi_corp_active_csms table
         query = """
         SELECT DISTINCT
-            account_id,
-            preferred_csm_name as csm_name,
+            chd.account_id,
+            chd.preferred_csm_name as csm_name,
             100000 as revenue,
             5 as neediness_score,
             0 as tad_score,
@@ -686,11 +712,24 @@ class CSMRoutingAutomation:
             'Residential' as segment,
             'Corporate' as account_level,
             'Yellow' as health_segment
+        FROM DSV_WAREHOUSE.POST_SALES.VW_CUSTOMER_HISTORY_DAILY chd
+        INNER JOIN DSV_WAREHOUSE.DATA_SCIENCE.resi_corp_active_csms r
+            ON chd.preferred_csm_name = r.active_csm
+        WHERE chd.calendar_date = (SELECT MAX(calendar_date) FROM DSV_WAREHOUSE.POST_SALES.VW_CUSTOMER_HISTORY_DAILY)
+            AND chd.preferred_csm_role = 'Success Rep'
+            AND chd.preferred_csm_name IS NOT NULL
+        """
+
+        # First get unfiltered count for logging
+        unfiltered_books_query = """
+        SELECT COUNT(DISTINCT preferred_csm_name) as total_csms
         FROM DSV_WAREHOUSE.POST_SALES.VW_CUSTOMER_HISTORY_DAILY
         WHERE calendar_date = (SELECT MAX(calendar_date) FROM DSV_WAREHOUSE.POST_SALES.VW_CUSTOMER_HISTORY_DAILY)
             AND preferred_csm_role = 'Success Rep'
             AND preferred_csm_name IS NOT NULL
         """
+        unfiltered_df = self.execute_query(unfiltered_books_query)
+        total_csms_with_books = unfiltered_df['total_csms'].iloc[0] if not unfiltered_df.empty else 0
 
         df = self.execute_query(query)
 
@@ -699,7 +738,8 @@ class CSMRoutingAutomation:
 
         # Check if dataframe is empty or missing required column
         if df.empty or 'csm_name' not in df.columns:
-            logger.warning("No CSM book data found or missing csm_name column")
+            logger.warning("No CSM book data found after filtering by resi_corp_active_csms table")
+            logger.info(f"Total CSMs with books before filtering: {total_csms_with_books}")
             return {}
 
         # Group by CSM to create book structure
@@ -781,11 +821,13 @@ class CSMRoutingAutomation:
         # and have at least the minimum number of accounts
         self.eligible_csm_list = list(filtered_csm_books.keys())
 
-        logger.info(f"Retrieved book data for {len(csm_books)} CSMs")
-        logger.info(f"After filtering (>= {min_account_threshold} accounts): {len(filtered_csm_books)} eligible CSMs")
-        logger.info(f"Active CSMs from Workday: {len(active_csms_workday)}")
+        logger.info(f"Retrieved book data for {len(csm_books)} CSMs (already filtered by resi_corp_active_csms)")
+        logger.info(f"CSMs with books before resi_corp_active_csms filter: {total_csms_with_books}")
+        logger.info(f"CSMs filtered out by resi_corp_active_csms: {total_csms_with_books - len(df['csm_name'].unique())}")
+        logger.info(f"After minimum account threshold (>= {min_account_threshold} accounts): {len(filtered_csm_books)} eligible CSMs")
+        logger.info(f"Active CSMs from Workday (after resi_corp_active_csms filter): {len(active_csms_workday)}")
         logger.info(f"Managers to exclude: {', '.join(managers_to_exclude) if managers_to_exclude else 'None'}")
-        logger.info(f"Eligible CSMs for assignment: {', '.join(self.eligible_csm_list)}")
+        logger.info(f"Final eligible CSMs for assignment: {', '.join(self.eligible_csm_list)}")
 
         return filtered_csm_books
 
