@@ -206,6 +206,7 @@ class CSMRoutingAutomation:
         FROM DSV_SHARE.PUBLIC.VW_ONBOARDING_DETAIL
         WHERE success_transition_status_ob = 'Needs CSM'
             AND account_id_ob IS NOT NULL
+             and onboarding_status_ob in ('Success', 'Onboarding', 'Live')
         """
 
         df = self.execute_query(query)
