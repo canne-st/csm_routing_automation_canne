@@ -1,63 +1,86 @@
-#!/usr/bin/env python
-# coding: utf-8
+#!/usr/bin/env python3
+"""Quick script to check table state"""
 
-"""
-Check what tables and columns are available
-"""
+import snowflake.connector
+from dotenv import load_dotenv
+import os
 
-import logging
-from csm_routing_automation import CSMRoutingAutomation
+load_dotenv()
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-# Initialize the automation
-automation = CSMRoutingAutomation(
-    config_file='properties.json',
-    limits_file='csm_category_limits.json'
+conn = snowflake.connector.connect(
+    account=os.getenv('SNOWFLAKE_ACCOUNT'),
+    user=os.getenv('SNOWFLAKE_USER'),
+    password=os.getenv('SNOWFLAKE_PASSWORD'),
+    warehouse=os.getenv('SNOWFLAKE_WAREHOUSE'),
+    database=os.getenv('SNOWFLAKE_DATABASE'),
+    schema=os.getenv('SNOWFLAKE_SCHEMA'),
+    role=os.getenv('SNOWFLAKE_ROLE')
 )
 
-# Connect to Snowflake
-if not automation.connect_snowflake():
-    logger.error("Failed to connect to Snowflake")
-else:
-    # Check what we can query from the onboarding view (which we know works)
-    query = """
-    SELECT TOP 5
-        account_id_ob,
-        tenant_id,
-        tenant_name,
-        success_transition_status_ob
-    FROM DSV_SHARE.PUBLIC.VW_ONBOARDING_DETAIL
-    WHERE account_id_ob IS NOT NULL
-    """
+cursor = conn.cursor()
 
-    logger.info("Testing onboarding view...")
-    df = automation.execute_query(query)
+print('=' * 60)
+print('CHECKING CSM ROUTING TABLES')
+print('=' * 60)
 
-    if not df.empty:
-        logger.info(f"✅ Onboarding view works! Columns: {df.columns.tolist()}")
+# Check recommendations
+cursor.execute('''
+    SELECT COUNT(*) as total,
+           COUNT(CASE WHEN llm_reviewed = TRUE THEN 1 END) as reviewed,
+           COUNT(CASE WHEN llm_approved = TRUE THEN 1 END) as approved
+    FROM DSV_WAREHOUSE.DATA_SCIENCE.CSM_ROUTING_RECOMMENDATIONS_CANNE
+''')
+rec = cursor.fetchone()
+print(f'\nRECOMMENDATIONS TABLE:')
+print(f'  Total recommendations: {rec[0]}')
+print(f'  LLM reviewed: {rec[1]}')
+print(f'  LLM approved: {rec[2]}')
 
-    # Now test with health data
-    query2 = """
-    SELECT TOP 5
-        account_id,
-        core_health_score,
-        core_health_score_color
-    FROM DSV_WAREHOUSE.POST_SALES.VW_CUSTOMER_HISTORY_DAILY
-    WHERE is_current = TRUE
-        AND account_id IS NOT NULL
-    """
+# Check assignments
+cursor.execute('''
+    SELECT COUNT(*) as total
+    FROM DSV_WAREHOUSE.DATA_SCIENCE.ACCOUNT_CSM_ASSIGNMENTS_CANNE
+''')
+assignments = cursor.fetchone()[0]
+print(f'\nFINAL ASSIGNMENTS TABLE:')
+print(f'  Total assignments: {assignments}')
 
-    logger.info("\nTesting customer history view...")
-    df2 = automation.execute_query(query2)
+# Check last 5 assignments
+cursor.execute('''
+    SELECT account_id, assigned_csm_name, assignment_timestamp
+    FROM DSV_WAREHOUSE.DATA_SCIENCE.ACCOUNT_CSM_ASSIGNMENTS_CANNE
+    ORDER BY assignment_timestamp DESC
+    LIMIT 5
+''')
+last_assignments = cursor.fetchall()
+if last_assignments:
+    print(f'\nLast 5 assignments:')
+    for row in last_assignments:
+        print(f'  {row[0]} -> {row[1]} at {row[2]}')
 
-    if not df2.empty:
-        logger.info(f"✅ Customer history works! Columns: {df2.columns.tolist()}")
-        logger.info(f"Sample health colors: {df2['core_health_score_color'].unique()}")
+# Check for unreviewed recommendations
+cursor.execute('''
+    SELECT COUNT(*) as unreviewed
+    FROM DSV_WAREHOUSE.DATA_SCIENCE.CSM_ROUTING_RECOMMENDATIONS_CANNE
+    WHERE llm_reviewed IS NULL OR llm_reviewed = FALSE
+''')
+unreviewed = cursor.fetchone()[0]
+if unreviewed > 0:
+    print(f'\n⚠️ WARNING: {unreviewed} recommendations have not been reviewed by LLM')
 
-    automation.snowflake_conn.close()
+    cursor.execute('''
+        SELECT account_id, recommended_csm, recommendation_timestamp
+        FROM DSV_WAREHOUSE.DATA_SCIENCE.CSM_ROUTING_RECOMMENDATIONS_CANNE
+        WHERE llm_reviewed IS NULL OR llm_reviewed = FALSE
+        ORDER BY recommendation_timestamp DESC
+        LIMIT 5
+    ''')
+    unreviewed_recs = cursor.fetchall()
+    print(f'\nFirst 5 unreviewed recommendations:')
+    for row in unreviewed_recs:
+        print(f'  {row[0]} -> {row[1]} at {row[2]}')
+
+cursor.close()
+conn.close()
+
+print('\n' + '=' * 60)

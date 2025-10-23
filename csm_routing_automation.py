@@ -196,9 +196,10 @@ class CSMRoutingAutomation:
             logger.error(f"Query execution failed: {str(e)}")
             return pd.DataFrame()
 
-    def get_needs_csm_accounts(self) -> pd.DataFrame:
+    def get_needs_csm_accounts(self, limit=None) -> pd.DataFrame:
         """Fetch accounts that need CSM assignment"""
-        query = """
+        limit_clause = f"LIMIT {limit}" if limit else ""
+        query = f"""
         SELECT
             account_id_ob as account_id,
             tenant_id,
@@ -206,7 +207,8 @@ class CSMRoutingAutomation:
         FROM DSV_SHARE.PUBLIC.VW_ONBOARDING_DETAIL
         WHERE success_transition_status_ob = 'Needs CSM'
             AND account_id_ob IS NOT NULL
-             and onboarding_status_ob in ('Success', 'Onboarding', 'Live')
+            AND onboarding_status_ob in ('Success', 'Onboarding', 'Live')
+        {limit_clause}
         """
 
         df = self.execute_query(query)
@@ -1628,11 +1630,13 @@ Be specific and actionable. Default to approval unless there are clear, signific
 
     def update_assignments_in_snowflake(self, assignments: Dict, llm_feedback: str = None) -> bool:
         """Update CSM assignments back to Snowflake with LLM feedback"""
+        logger.info(f"DEBUG: update_assignments_in_snowflake called with {len(assignments) if assignments else 0} assignments")
         if not assignments:
             logger.info("No assignments to update")
             return True
 
         try:
+            logger.info(f"DEBUG: Connecting to Snowflake to write {len(assignments)} assignments to ACCOUNT_CSM_ASSIGNMENTS_CANNE")
             cursor = self.snowflake_conn.cursor()
 
             # First ensure the assignments table exists in DATA_SCIENCE schema with _CANNE suffix
@@ -1683,12 +1687,14 @@ Be specific and actionable. Default to approval unless there are clear, signific
                 )
                 """
 
+                logger.info(f"DEBUG: Executing UPDATE for account {account_id}")
                 cursor.execute(update_query)
+                logger.info(f"DEBUG: Executing INSERT for account {account_id}")
                 cursor.execute(insert_query)
 
                 # Note: We don't update VW_ONBOARDING_DETAIL directly as it's a view
                 # The source system should handle status updates based on our assignment table
-                logger.info(f"Saved assignment for account {account_id} to CSM {csm_name}")
+                logger.info(f"Saved assignment for account {account_id} to CSM {csm_name} in ACCOUNT_CSM_ASSIGNMENTS_CANNE")
 
                 # Mark recommendation as assigned
                 recommendation_update = f"""
@@ -1713,9 +1719,15 @@ Be specific and actionable. Default to approval unless there are clear, signific
             self.snowflake_conn.rollback()
             return False
 
-    def run(self):
-        """Main execution method"""
+    def run(self, test_limit=None):
+        """Main execution method
+
+        Args:
+            test_limit: Optional limit on number of accounts to process (for testing)
+        """
         logger.info("Starting CSM Routing Automation")
+        if test_limit:
+            logger.info(f"TEST MODE: Limited to {test_limit} account(s)")
 
         # Connect to Snowflake
         if not self.connect_snowflake():
@@ -1724,7 +1736,7 @@ Be specific and actionable. Default to approval unless there are clear, signific
 
         try:
             # Get accounts needing CSM
-            needs_csm_df = self.get_needs_csm_accounts()
+            needs_csm_df = self.get_needs_csm_accounts(limit=test_limit)
 
             if needs_csm_df.empty:
                 logger.info("No accounts need CSM assignment at this time")
@@ -1790,7 +1802,26 @@ Be specific and actionable. Default to approval unless there are clear, signific
                     logger.info(f"Processing {len(resi_corp_df)} accounts with PuLP optimization")
                     assignments = self.optimize_batch_with_pulp(resi_corp_df, csm_books)
 
+                    # Fallback: If PuLP optimization fails, process accounts one by one
+                    if not assignments:
+                        logger.warning("PuLP optimization failed or returned no assignments. Falling back to individual assignment...")
+                        assignments = {}
+                        for _, account in resi_corp_df.iterrows():
+                            csm, score = self.assign_single_account_optimized(account, csm_books)
+                            if csm:
+                                assignments[account['account_id']] = csm
+                                # Update the csm_books for next account
+                                csm_books[csm]['count'] += 1
+                                csm_books[csm]['total_neediness'] += account.get('neediness_score', 0)
+                                csm_books[csm]['total_revenue'] += account.get('revenue', 0)
+                                csm_books[csm]['total_tad'] += account.get('tad_score', 0)
+                                logger.info(f"Assigned {account['account_id']} to {csm} (fallback mode)")
+                            else:
+                                logger.warning(f"Could not assign account {account['account_id']} - all CSMs at capacity")
+
                 # Review assignments with LLM
+                logger.info(f"DEBUG: Assignments ready for review: {len(assignments) if assignments else 0}")
+                logger.info(f"DEBUG: Claude client available: {self.claude_client is not None}")
                 if assignments and self.claude_client:
                     logger.info("Reviewing assignments with Claude Sonnet...")
                     should_rerun, llm_feedback, revised_assignments = self.review_assignments_with_llm(
@@ -1799,16 +1830,41 @@ Be specific and actionable. Default to approval unless there are clear, signific
 
                     if should_rerun and retry_count < max_retries:
                         logger.warning(f"LLM recommends rerunning optimization. Feedback: {llm_feedback}")
-                        retry_count += 1
-                        # Revert csm_books changes if single account
-                        if len(resi_corp_df) == 1 and assignments:
-                            for account_id, csm in assignments.items():
+
+                        # If LLM provided revised assignments, use them instead of rerunning
+                        if revised_assignments and revised_assignments != assignments:
+                            logger.info(f"LLM provided revised assignments: {revised_assignments}")
+                            # Revert old assignments from csm_books
+                            if assignments:
+                                for account_id, old_csm in assignments.items():
+                                    account = resi_corp_df[resi_corp_df['account_id'] == account_id].iloc[0]
+                                    csm_books[old_csm]['count'] -= 1
+                                    csm_books[old_csm]['total_neediness'] -= account.get('neediness_score', 0)
+                                    csm_books[old_csm]['total_revenue'] -= account.get('revenue', 0)
+                                    csm_books[old_csm]['total_tad'] -= account.get('tad_score', 0)
+
+                            # Apply new assignments to csm_books
+                            for account_id, new_csm in revised_assignments.items():
                                 account = resi_corp_df[resi_corp_df['account_id'] == account_id].iloc[0]
-                                csm_books[csm]['count'] -= 1
-                                csm_books[csm]['total_neediness'] -= account.get('neediness_score', 0)
-                                csm_books[csm]['total_revenue'] -= account.get('revenue', 0)
-                                csm_books[csm]['total_tad'] -= account.get('tad_score', 0)
-                        continue  # Retry the optimization
+                                csm_books[new_csm]['count'] += 1
+                                csm_books[new_csm]['total_neediness'] += account.get('neediness_score', 0)
+                                csm_books[new_csm]['total_revenue'] += account.get('revenue', 0)
+                                csm_books[new_csm]['total_tad'] += account.get('tad_score', 0)
+
+                            assignments = revised_assignments
+                            break  # Exit retry loop with LLM's suggested assignments
+                        else:
+                            # No revised assignments, retry optimization
+                            retry_count += 1
+                            # Revert csm_books changes if single account
+                            if len(resi_corp_df) == 1 and assignments:
+                                for account_id, csm in assignments.items():
+                                    account = resi_corp_df[resi_corp_df['account_id'] == account_id].iloc[0]
+                                    csm_books[csm]['count'] -= 1
+                                    csm_books[csm]['total_neediness'] -= account.get('neediness_score', 0)
+                                    csm_books[csm]['total_revenue'] -= account.get('revenue', 0)
+                                    csm_books[csm]['total_tad'] -= account.get('tad_score', 0)
+                            continue  # Retry the optimization
                     else:
                         if should_rerun:
                             logger.warning(f"LLM recommends rerunning but max retries reached. Proceeding with current assignments.")
@@ -1820,8 +1876,11 @@ Be specific and actionable. Default to approval unless there are clear, signific
                     break
 
             # Update assignments in Snowflake
+            logger.info(f"DEBUG: About to update assignments in Snowflake. Assignments: {len(assignments) if assignments else 0}")
             if assignments:
+                logger.info(f"DEBUG: Calling update_assignments_in_snowflake with {len(assignments)} assignments")
                 success = self.update_assignments_in_snowflake(assignments, llm_feedback)
+                logger.info(f"DEBUG: update_assignments_in_snowflake returned: {success}")
                 if success:
                     logger.info(f"Successfully assigned {len(assignments)} accounts to CSMs")
 

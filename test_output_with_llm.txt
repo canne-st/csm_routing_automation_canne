@@ -1,0 +1,101 @@
+2025-10-23 13:02:51,083 - INFO - Starting Single Account CSM Assignment Test
+2025-10-23 13:02:51,084 - INFO - Test started at: 2025-10-23 13:02:51.084033
+2025-10-23 13:02:51,084 - INFO - 
+This test will:
+2025-10-23 13:02:51,084 - INFO - 1. Connect to Snowflake using credentials from .env
+2025-10-23 13:02:51,084 - INFO - 2. Find ONE account needing CSM assignment
+2025-10-23 13:02:51,084 - INFO - 3. Get eligible CSMs (filtered by resi_corp_active_csms)
+2025-10-23 13:02:51,084 - INFO - 4. Run optimization to find best CSM
+2025-10-23 13:02:51,084 - INFO - 5. Store recommendation in CSM_ROUTING_RECOMMENDATIONS_CANNE
+2025-10-23 13:02:51,084 - INFO - 6. Run LLM review of the assignment
+2025-10-23 13:02:51,084 - INFO - 7. If approved, write to ACCOUNT_CSM_ASSIGNMENTS_CANNE
+2025-10-23 13:02:51,084 - INFO - 8. Generate SQL queries to verify results
+2025-10-23 13:02:51,084 - INFO - ================================================================================
+2025-10-23 13:02:51,084 - INFO - SINGLE ACCOUNT CSM ASSIGNMENT TEST
+2025-10-23 13:02:51,084 - INFO - Using main csm_routing_automation.py implementation
+2025-10-23 13:02:51,084 - INFO - ================================================================================
+2025-10-23 13:02:51,097 - INFO - 
+1. Connecting to Snowflake...
+2025-10-23 13:02:51,103 - INFO - Snowflake Connector for Python Version: 2.7.9, Python Version: 3.9.12, Platform: macOS-10.16-x86_64-i386-64bit
+2025-10-23 13:02:51,103 - INFO - This connection is in OCSP Fail Open Mode. TLS Certificates would be checked for validity and revocation status. Any other Certificate Revocation related exceptions or OCSP Responder failures would be disregarded in favor of connectivity.
+2025-10-23 13:02:51,103 - INFO - Setting use_openssl_only mode to False
+2025-10-23 13:02:52,218 - INFO - Connected to Snowflake successfully
+2025-10-23 13:02:52,219 - INFO - ✓ Connected to Snowflake successfully
+2025-10-23 13:02:52,219 - INFO - 
+2. Finding a single account that needs CSM assignment...
+2025-10-23 13:02:52,219 - INFO - query: [SELECT account_id_ob as account_id, tenant_id, success_transition_status_ob FROM...]
+2025-10-23 13:02:54,019 - INFO - query execution done
+2025-10-23 13:02:54,031 - INFO - ✓ Found account: 0011a00000cEN4RAAW
+2025-10-23 13:02:54,031 - INFO - 
+3. Enriching account data...
+2025-10-23 13:02:54,032 - INFO - First enrichment request - populating neediness cache...
+2025-10-23 13:02:54,032 - INFO - Populating neediness cache by running main neediness query...
+2025-10-23 13:02:54,032 - INFO - Loaded neediness query from neediness_scoring_main.sql
+2025-10-23 13:02:54,032 - INFO - Using main neediness query to populate cache
+2025-10-23 13:02:54,032 - INFO - query: [-- Comprehensive Neediness Scoring Query for CSM Routing Automation -- This is t...]
+2025-10-23 13:03:09,602 - INFO - query execution done
+2025-10-23 13:03:13,692 - INFO - Cache populated with 13272 accounts in 19.66 seconds
+2025-10-23 13:03:13,693 - INFO - Neediness distribution: {5.0: 2569, 4.0: 2547, 6.0: 1980, 3.0: 1694, 7.0: 1501, 8.0: 755, 2.0: 676, 9.0: 389, 10.0: 255, 1.0: 254, 11.0: 99, 12.0: 13}
+2025-10-23 13:03:13,693 - INFO - Health distribution: {'Green': 9613, 'Yellow': 2049, 'Red': 1155}
+2025-10-23 13:03:13,995 - INFO - Saved cache to neediness_cache_session_20251023_130313.csv for reference
+2025-10-23 13:03:13,995 - INFO - Using cached neediness data for 1 accounts
+2025-10-23 13:03:14,003 - WARNING - No accounts found in cache for IDs: ['0011a00000cEN4RAAW']...
+2025-10-23 13:03:14,005 - INFO - ✓ Account Details:
+2025-10-23 13:03:14,005 - INFO -   - Account ID: 0011a00000cEN4RAAW
+2025-10-23 13:03:14,005 - INFO -   - Segment: Residential
+2025-10-23 13:03:14,005 - INFO -   - Level: Corporate
+2025-10-23 13:03:14,005 - INFO -   - Neediness Score: 5
+2025-10-23 13:03:14,005 - INFO -   - Health Score: 70
+2025-10-23 13:03:14,005 - INFO -   - Revenue: $100,000.00
+2025-10-23 13:03:14,005 - INFO - 
+4. Getting eligible CSMs (filtered by resi_corp_active_csms)...
+2025-10-23 13:03:14,005 - INFO - query: [SELECT COUNT(DISTINCT CONCAT(legal_first_name, ' ', legal_last_name)) as total_c...]
+2025-10-23 13:03:15,670 - INFO - query execution done
+2025-10-23 13:03:15,674 - INFO - query: [WITH cte AS ( SELECT PREFERRED_FULL_NAME, CONCAT(legal_first_name, ' ', legal_la...]
+2025-10-23 13:03:17,887 - INFO - query execution done
+2025-10-23 13:03:17,892 - INFO - Retrieved 21 active CSMs from Workday (filtered by resi_corp_active_csms table)
+2025-10-23 13:03:17,892 - INFO - Filtered out 165 CSMs who are not in resi_corp_active_csms
+2025-10-23 13:03:17,892 - INFO - Retrieved 6 managers from filtered CSMs
+2025-10-23 13:03:17,892 - INFO - query: [WITH csm_first_assignment AS ( SELECT preferred_csm_name as csm_name, MIN(calend...]
+2025-10-23 13:03:18,103 - INFO - query execution done
+2025-10-23 13:03:18,111 - INFO - Building CSM books from cached neediness data...
+2025-10-23 13:03:18,141 - INFO - Using column 'responsible_csm' for CSM names
+2025-10-23 13:03:18,142 - INFO - query: [SELECT active_csm FROM DSV_WAREHOUSE.DATA_SCIENCE.resi_corp_active_csms]
+2025-10-23 13:03:18,346 - INFO - query execution done
+2025-10-23 13:03:18,354 - INFO - CSMs with Residential Corporate accounts: 31
+2025-10-23 13:03:18,366 - WARNING - CSM Sam Allread has assignments but not found in active Workday CSMs - skipping
+2025-10-23 13:03:18,388 - WARNING - CSM Kyle Shinmoto has assignments but not found in active Workday CSMs - skipping
+2025-10-23 13:03:18,399 - WARNING - CSM Alex Janssens has assignments but not found in active Workday CSMs - skipping
+2025-10-23 13:03:18,410 - WARNING - CSM Maddie Millis has assignments but not found in active Workday CSMs - skipping
+2025-10-23 13:03:18,410 - WARNING - CSM Eddie Kane has assignments but not found in active Workday CSMs - skipping
+2025-10-23 13:03:18,410 - WARNING - CSM Lesman Santrosyan has assignments but not found in active Workday CSMs - skipping
+2025-10-23 13:03:18,420 - WARNING - CSM Jeff Grillo has assignments but not found in active Workday CSMs - skipping
+2025-10-23 13:03:18,421 - WARNING - CSM Ellen Ghumashyan has assignments but not found in active Workday CSMs - skipping
+2025-10-23 13:03:18,431 - WARNING - CSM Jessie Cross has assignments but not found in active Workday CSMs - skipping
+2025-10-23 13:03:18,469 - WARNING - CSM Ned Durrett has assignments but not found in active Workday CSMs - skipping
+2025-10-23 13:03:18,469 - INFO - Retrieved book data for 21 CSMs from neediness cache
+2025-10-23 13:03:18,469 - INFO - CSMs with Residential Corporate books: 31
+2025-10-23 13:03:18,469 - INFO - CSMs after resi_corp_active_csms filter: 31
+2025-10-23 13:03:18,469 - INFO - After minimum account threshold (>= 5 accounts): 21 eligible CSMs
+2025-10-23 13:03:18,469 - INFO - Active CSMs from Workday (after resi_corp_active_csms filter): 21
+2025-10-23 13:03:18,469 - INFO - Managers to exclude: Hunter Schoettle, Kyle Lee, Sean Fadling, Lexi Gonzalez, Razmig Koulloukian, Vahakn Bchtikian (Վահագն Բշտիկյան)
+2025-10-23 13:03:18,469 - INFO - Final eligible CSMs for assignment: Han Pham, Jennifer Lam, Andre Tossunyan, Nicole Moore, Avery Wrenn, Krister Karlsson, Damian Gray, Michelle Booth, Gohar Grigoryan, Davit Mkrtchyan, Riley Bond, Anna Hayrapetyan, David Murrow, Hrag Jinbashian, Winnie Ng, Warren Rogers, Elen Badalyan, Sabrina Chacon, Alla Poghosyan, Esteban De La Riva, Paige Sadyan
+2025-10-23 13:03:18,470 - INFO - ✓ Found 21 eligible CSMs
+2025-10-23 13:03:18,470 - INFO - 
+Top 5 CSMs by availability:
+2025-10-23 13:03:18,470 - INFO -   - Han Pham: 79 accounts (capacity: 6)
+2025-10-23 13:03:18,470 - INFO -   - Avery Wrenn: 79 accounts (capacity: 6)
+2025-10-23 13:03:18,470 - INFO -   - Michelle Booth: 81 accounts (capacity: 4)
+2025-10-23 13:03:18,470 - INFO -   - Riley Bond: 81 accounts (capacity: 4)
+2025-10-23 13:03:18,470 - INFO -   - Damian Gray: 82 accounts (capacity: 3)
+2025-10-23 13:03:18,470 - INFO - 
+5. Ensuring recommendations table exists...
+2025-10-23 13:03:18,470 - INFO - query: [CREATE TABLE IF NOT EXISTS DSV_WAREHOUSE.DATA_SCIENCE.CSM_ROUTING_RECOMMENDATION...]
+2025-10-23 13:03:18,643 - INFO - query execution done
+2025-10-23 13:03:18,643 - INFO - Recommendations table DSV_WAREHOUSE.DATA_SCIENCE.CSM_ROUTING_RECOMMENDATIONS_CANNE verified/created (using _CANNE suffix)
+2025-10-23 13:03:18,644 - INFO - 
+6. Running assignment optimization...
+2025-10-23 13:03:18,644 - INFO - Evaluating 21 eligible CSMs for account 0011a00000cEN4RAAW with health: Yellow
+2025-10-23 13:03:18,644 - INFO - query: [SELECT CORE_HEALTH_SCORE_COLOR as health_segment, COUNT(*) as count FROM DSV_WAR...]
+2025-10-23 13:03:18,872 - INFO - query execution done
+2025-10-23 13:03:18,975 - INFO - query: [SELECT COUNT(*) as total_recommendations, COUNT(CASE WHEN recommendation_timesta...]

@@ -1,0 +1,45 @@
+2025-10-23 13:38:11,594 - INFO - Starting CSM Routing Automation Test
+2025-10-23 13:38:11,594 - INFO - Started at: 2025-10-23 13:38:11.594680
+2025-10-23 13:38:11,594 - INFO - ================================================================================
+2025-10-23 13:38:11,594 - INFO - RUNNING MAIN CSM ROUTING AUTOMATION
+2025-10-23 13:38:11,594 - INFO - ================================================================================
+2025-10-23 13:38:11,606 - INFO - 
+Starting main automation flow...
+2025-10-23 13:38:11,606 - INFO - Starting CSM Routing Automation
+2025-10-23 13:38:11,613 - INFO - Snowflake Connector for Python Version: 2.7.9, Python Version: 3.9.12, Platform: macOS-10.16-x86_64-i386-64bit
+2025-10-23 13:38:11,613 - INFO - This connection is in OCSP Fail Open Mode. TLS Certificates would be checked for validity and revocation status. Any other Certificate Revocation related exceptions or OCSP Responder failures would be disregarded in favor of connectivity.
+2025-10-23 13:38:11,613 - INFO - Setting use_openssl_only mode to False
+2025-10-23 13:38:12,526 - INFO - Connected to Snowflake successfully
+2025-10-23 13:38:12,526 - INFO - query: [SELECT account_id_ob as account_id, tenant_id, success_transition_status_ob FROM...]
+2025-10-23 13:38:12,917 - INFO - query execution done
+2025-10-23 13:38:12,923 - INFO - Found 1 accounts needing CSM assignment
+2025-10-23 13:38:12,923 - INFO - First enrichment request - populating neediness cache...
+2025-10-23 13:38:12,923 - INFO - Populating neediness cache by running main neediness query...
+2025-10-23 13:38:12,924 - INFO - Loaded neediness query from neediness_scoring_main.sql
+2025-10-23 13:38:12,924 - INFO - Using main neediness query to populate cache
+2025-10-23 13:38:12,924 - INFO - query: [-- Comprehensive Neediness Scoring Query for CSM Routing Automation -- This is t...]
+2025-10-23 13:38:24,829 - INFO - query execution done
+2025-10-23 13:38:28,747 - INFO - Cache populated with 13272 accounts in 15.82 seconds
+2025-10-23 13:38:28,748 - INFO - Neediness distribution: {5.0: 2571, 4.0: 2545, 6.0: 1980, 3.0: 1694, 7.0: 1500, 8.0: 757, 2.0: 675, 9.0: 389, 10.0: 255, 1.0: 254, 11.0: 99, 12.0: 13}
+2025-10-23 13:38:28,749 - INFO - Health distribution: {'Green': 9613, 'Yellow': 2049, 'Red': 1155}
+2025-10-23 13:38:29,041 - INFO - Saved cache to neediness_cache_session_20251023_133828.csv for reference
+2025-10-23 13:38:29,041 - INFO - Using cached neediness data for 1 accounts
+2025-10-23 13:38:29,049 - INFO - Found 1 accounts in cache
+2025-10-23 13:38:29,050 - INFO - Sample enriched account - Neediness: 4.0, Health: 66.0, Revenue: N/A
+2025-10-23 13:38:29,053 - INFO - Successfully enriched 1 accounts from cache
+2025-10-23 13:38:29,054 - INFO - No Residential Corporate accounts need assignment
+2025-10-23 13:38:29,054 - INFO - closed
+2025-10-23 13:38:29,184 - INFO - No async queries seem to be running, deleting session
+2025-10-23 13:38:29,337 - INFO - Closed Snowflake connection
+2025-10-23 13:38:29,337 - INFO - 
+================================================================================
+2025-10-23 13:38:29,337 - INFO - AUTOMATION COMPLETE
+2025-10-23 13:38:29,337 - INFO - ================================================================================
+2025-10-23 13:38:29,337 - INFO - 
+Check the following tables:
+2025-10-23 13:38:29,337 - INFO - 1. CSM_ROUTING_RECOMMENDATIONS_CANNE - for optimization results
+2025-10-23 13:38:29,337 - INFO - 2. ACCOUNT_CSM_ASSIGNMENTS_CANNE - for final assignments
+2025-10-23 13:38:29,340 - INFO - 
+Completed at: 2025-10-23 13:38:29.340059
+2025-10-23 13:38:29,340 - INFO - 
+✅ SUCCESSFUL!
