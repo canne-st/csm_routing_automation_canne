@@ -292,7 +292,10 @@ class CSMRoutingAutomation:
         else:
             df['health_score'] = 70
 
-        if 'revenue' in df.columns:
+        # Map total_mrr from neediness query to revenue field
+        if 'total_mrr' in df.columns:
+            df['revenue'] = df['total_mrr'].fillna(100000)
+        elif 'revenue' in df.columns:
             df['revenue'] = df['revenue'].fillna(100000)
         else:
             df['revenue'] = 100000
@@ -1271,7 +1274,7 @@ class CSMRoutingAutomation:
         # Current book statistics
         for csm, info in csm_books.items():
             health_dist = self.get_csm_health_distribution(csm)
-            analysis['book_stats'].append({
+            csm_stat = {
                 'csm': csm,
                 'accounts': info['count'],
                 'total_neediness': info['total_neediness'],
@@ -1282,8 +1285,23 @@ class CSMRoutingAutomation:
                     'yellow_pct': (health_dist.get('Yellow', 0) / max(health_dist.get('total', 1), 1)) * 100,
                     'green_pct': (health_dist.get('Green', 0) / max(health_dist.get('total', 1), 1)) * 100
                 }
-            })
+            }
+            analysis['book_stats'].append(csm_stat)
             analysis['health_distribution'][csm] = health_dist
+
+        # Print book stats for visibility
+        logger.info("=" * 60)
+        logger.info("CSM BOOK STATS (Data sent to LLM):")
+        logger.info("=" * 60)
+        for stat in analysis['book_stats']:
+            logger.info(f"CSM: {stat['csm']}")
+            logger.info(f"  Accounts: {stat['accounts']}")
+            logger.info(f"  Avg Neediness: {stat['avg_neediness']:.2f}")
+            logger.info(f"  Total Revenue: ${stat['total_revenue']:,.2f}")
+            logger.info(f"  Health: Red={stat['health_distribution']['red_pct']:.1f}%, "
+                       f"Yellow={stat['health_distribution']['yellow_pct']:.1f}%, "
+                       f"Green={stat['health_distribution']['green_pct']:.1f}%")
+        logger.info("=" * 60)
 
         return analysis
 
