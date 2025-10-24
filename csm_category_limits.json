@@ -1,6 +1,6 @@
 {
     "residential_corporate": {
-        "max_accounts_per_csm": 85,
+        "max_accounts_per_csm": 105,
         "cooling_period_hours": 4,
         "min_accounts_for_eligibility": 5
     },
