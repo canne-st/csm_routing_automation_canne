@@ -70,6 +70,7 @@ class CSMRoutingAutomation:
 
         # Output table for storing recommendations - using _CANNE suffix
         self.recommendations_table = 'DSV_WAREHOUSE.DATA_SCIENCE.CSM_ROUTING_RECOMMENDATIONS_CANNE'
+        self.assignments_table = 'DSV_WAREHOUSE.DATA_SCIENCE.ACCOUNT_CSM_ASSIGNMENTS_CANNE'
 
         # Initialize Claude client if API key is available
         if 'ANTHROPIC_API_KEY' in self.config:
@@ -878,6 +879,43 @@ class CSMRoutingAutomation:
 
         except Exception as e:
             logger.error(f"Failed to store recommendation for account {account_id}: {str(e)}")
+
+    def get_recently_assigned_csms(self, hours: int = 1) -> list:
+        """Get list of CSMs who received assignments in the last N hours from BOTH tables"""
+        recently_assigned = set()
+
+        # Check recommendations table
+        query1 = f"""
+        SELECT DISTINCT recommended_csm
+        FROM {self.recommendations_table}
+        WHERE recommendation_timestamp >= DATEADD(hour, -{hours}, CURRENT_TIMESTAMP())
+        """
+
+        # Check final assignments table
+        query2 = f"""
+        SELECT DISTINCT csm_name
+        FROM {self.assignments_table}
+        WHERE assignment_date >= DATEADD(hour, -{hours}, CURRENT_TIMESTAMP())
+        """
+
+        try:
+            # Get CSMs from recommendations
+            df1 = self.execute_query(query1)
+            if not df1.empty:
+                recently_assigned.update(df1['RECOMMENDED_CSM'].tolist())
+
+            # Get CSMs from final assignments
+            df2 = self.execute_query(query2)
+            if not df2.empty:
+                recently_assigned.update(df2['CSM_NAME'].tolist())
+
+            if recently_assigned:
+                logger.info(f"Excluding {len(recently_assigned)} CSMs with assignments in last {hours} hour(s): {list(recently_assigned)}")
+
+        except Exception as e:
+            logger.warning(f"Could not get recently assigned CSMs: {str(e)}")
+
+        return list(recently_assigned)
 
     def calculate_assignment_recency_penalty(self, csm_name: str) -> float:
         """
@@ -1831,12 +1869,15 @@ Be specific and actionable. Default to approval unless there are clear, signific
                     logger.info(f"Retry {retry_count}: Re-running assignment optimization based on LLM feedback")
                     assignments = {}
 
+                # Get recently assigned CSMs to exclude (last 1 hour)
+                recently_assigned = self.get_recently_assigned_csms(hours=1)
+
                 # Process based on batch size
                 if len(resi_corp_df) == 1:
                     # Single account - use optimized best fit
                     logger.info("Processing single account with optimized best fit")
                     account = resi_corp_df.iloc[0]
-                    csm, score = self.assign_single_account_optimized(account, csm_books)
+                    csm, score = self.assign_single_account_optimized(account, csm_books, excluded_csms=recently_assigned)
                     if csm:
                         assignments[account['account_id']] = csm
                         # Update the csm_books for next iteration
@@ -1847,14 +1888,14 @@ Be specific and actionable. Default to approval unless there are clear, signific
                 else:
                     # Multiple accounts - use PuLP optimization
                     logger.info(f"Processing {len(resi_corp_df)} accounts with PuLP optimization")
-                    assignments = self.optimize_batch_with_pulp(resi_corp_df, csm_books)
+                    assignments = self.optimize_batch_with_pulp(resi_corp_df, csm_books, excluded_csms=recently_assigned)
 
                     # Fallback: If PuLP optimization fails, process accounts one by one
                     if not assignments:
                         logger.warning("PuLP optimization failed or returned no assignments. Falling back to individual assignment...")
                         assignments = {}
                         for _, account in resi_corp_df.iterrows():
-                            csm, score = self.assign_single_account_optimized(account, csm_books)
+                            csm, score = self.assign_single_account_optimized(account, csm_books, excluded_csms=recently_assigned)
                             if csm:
                                 assignments[account['account_id']] = csm
                                 # Update the csm_books for next account
