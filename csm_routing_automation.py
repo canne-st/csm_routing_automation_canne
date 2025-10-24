@@ -208,6 +208,18 @@ class CSMRoutingAutomation:
         WHERE success_transition_status_ob = 'Needs CSM'
             AND account_id_ob IS NOT NULL
             AND onboarding_status_ob in ('Success', 'Onboarding', 'Live')
+            -- Exclude accounts already in recommendations table
+            AND account_id_ob NOT IN (
+                SELECT DISTINCT account_id
+                FROM DSV_WAREHOUSE.DATA_SCIENCE.CSM_ROUTING_RECOMMENDATIONS_CANNE
+                WHERE account_id IS NOT NULL
+            )
+            -- Exclude accounts already in assignments table
+            AND account_id_ob NOT IN (
+                SELECT DISTINCT account_id
+                FROM DSV_WAREHOUSE.DATA_SCIENCE.ACCOUNT_CSM_ASSIGNMENTS_CANNE
+                WHERE account_id IS NOT NULL
+            )
         {limit_clause}
         """
 
