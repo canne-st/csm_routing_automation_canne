@@ -888,6 +888,7 @@ class CSMRoutingAutomation:
         - For medium batches (6-20): exclude CSMs with >2 assignments in last hour
         - For large batches (20+): exclude CSMs with >5 assignments in last 4 hours
         """
+        logger.info(f"🔍 Checking for recently assigned CSMs (batch size: {num_accounts_processing})")
         recently_assigned = set()
 
         # First, exclude CSMs already assigned in current batch/session
@@ -899,10 +900,10 @@ class CSMRoutingAutomation:
 
         # Dynamic time window based on batch size
         if num_accounts_processing <= 5:
-            # Small batch: strict recent exclusion (15 mins)
-            time_window = 0.25  # 15 minutes
-            max_allowed = 0
-            window_desc = "15 minutes"
+            # Small batch: check last 2 hours and exclude any CSM with recent assignments
+            time_window = 2  # 2 hours (was 15 minutes - too short!)
+            max_allowed = 0  # Any assignment in last 2 hours = excluded
+            window_desc = "2 hours"
         elif num_accounts_processing <= 20:
             # Medium batch: moderate exclusion (1 hour, allow 1-2)
             time_window = 1
@@ -917,11 +918,12 @@ class CSMRoutingAutomation:
         # Check recent assignment velocity
         query = f"""
         WITH recent_assignments AS (
+            -- Include ALL recent recommendations, not just assigned ones
+            -- This prevents the same CSM from being repeatedly recommended
             SELECT recommended_csm as csm_name,
                    COUNT(*) as assignment_count
             FROM {self.recommendations_table}
             WHERE recommendation_timestamp >= DATEADD(hour, -{time_window}, CURRENT_TIMESTAMP())
-                AND was_assigned = TRUE
             GROUP BY recommended_csm
 
             UNION ALL
@@ -936,16 +938,29 @@ class CSMRoutingAutomation:
                SUM(assignment_count) as total_assignments
         FROM recent_assignments
         GROUP BY csm_name
-        HAVING SUM(assignment_count) > {max_allowed}
+        ORDER BY total_assignments DESC
         """
 
         try:
             df = self.execute_query(query)
             if not df.empty:
-                overloaded_csms = df['CSM_NAME'].tolist()
-                recently_assigned.update(overloaded_csms)
+                logger.info(f"Recent CSM activity (last {window_desc}, max allowed: {max_allowed}):")
                 for _, row in df.iterrows():
-                    logger.info(f"Excluding {row['CSM_NAME']}: {int(row['TOTAL_ASSIGNMENTS'])} assignments in last {window_desc}")
+                    csm_name = row['CSM_NAME']
+                    total_assignments = int(row['TOTAL_ASSIGNMENTS'])
+
+                    if total_assignments > max_allowed:
+                        recently_assigned.add(csm_name)
+                        logger.info(f"  ❌ {csm_name}: {total_assignments} assignments -> EXCLUDING")
+                    else:
+                        logger.info(f"  ✓ {csm_name}: {total_assignments} assignments -> available")
+
+                if recently_assigned:
+                    logger.info(f"📊 Total excluded: {len(recently_assigned)} CSMs")
+                else:
+                    logger.info(f"📊 No CSMs excluded - all available for assignment")
+            else:
+                logger.info(f"📊 No recent CSM activity found in last {window_desc}")
 
         except Exception as e:
             logger.warning(f"Could not get recently assigned CSMs: {str(e)}")
