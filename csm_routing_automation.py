@@ -880,37 +880,72 @@ class CSMRoutingAutomation:
         except Exception as e:
             logger.error(f"Failed to store recommendation for account {account_id}: {str(e)}")
 
-    def get_recently_assigned_csms(self, hours: int = 1) -> list:
-        """Get list of CSMs who received assignments in the last N hours from BOTH tables"""
+    def get_recently_assigned_csms(self, current_batch_assignments: dict = None, num_accounts_processing: int = 1) -> list:
+        """
+        Smart exclusion of CSMs based on context:
+        - For current batch: exclude CSMs already assigned in THIS run
+        - For small batches (1-5): exclude CSMs with assignments in last 15 mins
+        - For medium batches (6-20): exclude CSMs with >2 assignments in last hour
+        - For large batches (20+): exclude CSMs with >5 assignments in last 4 hours
+        """
         recently_assigned = set()
 
-        # Check recommendations table
-        query1 = f"""
-        SELECT DISTINCT recommended_csm
-        FROM {self.recommendations_table}
-        WHERE recommendation_timestamp >= DATEADD(hour, -{hours}, CURRENT_TIMESTAMP())
-        """
+        # First, exclude CSMs already assigned in current batch/session
+        if current_batch_assignments:
+            batch_csms = set(current_batch_assignments.values())
+            if batch_csms:
+                recently_assigned.update(batch_csms)
+                logger.info(f"Excluding {len(batch_csms)} CSMs already assigned in current batch: {list(batch_csms)}")
 
-        # Check final assignments table
-        query2 = f"""
-        SELECT DISTINCT csm_name
-        FROM {self.assignments_table}
-        WHERE assignment_date >= DATEADD(hour, -{hours}, CURRENT_TIMESTAMP())
+        # Dynamic time window based on batch size
+        if num_accounts_processing <= 5:
+            # Small batch: strict recent exclusion (15 mins)
+            time_window = 0.25  # 15 minutes
+            max_allowed = 0
+            window_desc = "15 minutes"
+        elif num_accounts_processing <= 20:
+            # Medium batch: moderate exclusion (1 hour, allow 1-2)
+            time_window = 1
+            max_allowed = 2
+            window_desc = "1 hour"
+        else:
+            # Large batch: lenient exclusion (4 hours, allow up to 5)
+            time_window = 4
+            max_allowed = 5
+            window_desc = "4 hours"
+
+        # Check recent assignment velocity
+        query = f"""
+        WITH recent_assignments AS (
+            SELECT recommended_csm as csm_name,
+                   COUNT(*) as assignment_count
+            FROM {self.recommendations_table}
+            WHERE recommendation_timestamp >= DATEADD(hour, -{time_window}, CURRENT_TIMESTAMP())
+                AND was_assigned = TRUE
+            GROUP BY recommended_csm
+
+            UNION ALL
+
+            SELECT csm_name,
+                   COUNT(*) as assignment_count
+            FROM {self.assignments_table}
+            WHERE assignment_date >= DATEADD(hour, -{time_window}, CURRENT_TIMESTAMP())
+            GROUP BY csm_name
+        )
+        SELECT csm_name,
+               SUM(assignment_count) as total_assignments
+        FROM recent_assignments
+        GROUP BY csm_name
+        HAVING SUM(assignment_count) > {max_allowed}
         """
 
         try:
-            # Get CSMs from recommendations
-            df1 = self.execute_query(query1)
-            if not df1.empty:
-                recently_assigned.update(df1['RECOMMENDED_CSM'].tolist())
-
-            # Get CSMs from final assignments
-            df2 = self.execute_query(query2)
-            if not df2.empty:
-                recently_assigned.update(df2['CSM_NAME'].tolist())
-
-            if recently_assigned:
-                logger.info(f"Excluding {len(recently_assigned)} CSMs with assignments in last {hours} hour(s): {list(recently_assigned)}")
+            df = self.execute_query(query)
+            if not df.empty:
+                overloaded_csms = df['CSM_NAME'].tolist()
+                recently_assigned.update(overloaded_csms)
+                for _, row in df.iterrows():
+                    logger.info(f"Excluding {row['CSM_NAME']}: {int(row['TOTAL_ASSIGNMENTS'])} assignments in last {window_desc}")
 
         except Exception as e:
             logger.warning(f"Could not get recently assigned CSMs: {str(e)}")
@@ -1869,8 +1904,11 @@ Be specific and actionable. Default to approval unless there are clear, signific
                     logger.info(f"Retry {retry_count}: Re-running assignment optimization based on LLM feedback")
                     assignments = {}
 
-                # Get recently assigned CSMs to exclude (last 1 hour)
-                recently_assigned = self.get_recently_assigned_csms(hours=1)
+                # Get recently assigned CSMs to exclude (smart exclusion based on batch size)
+                recently_assigned = self.get_recently_assigned_csms(
+                    current_batch_assignments=assignments,
+                    num_accounts_processing=len(resi_corp_df)
+                )
 
                 # Process based on batch size
                 if len(resi_corp_df) == 1:
@@ -1895,7 +1933,12 @@ Be specific and actionable. Default to approval unless there are clear, signific
                         logger.warning("PuLP optimization failed or returned no assignments. Falling back to individual assignment...")
                         assignments = {}
                         for _, account in resi_corp_df.iterrows():
-                            csm, score = self.assign_single_account_optimized(account, csm_books, excluded_csms=recently_assigned)
+                            # Update exclusion list to include CSMs already assigned in this batch
+                            current_exclusions = recently_assigned.copy()
+                            if assignments:
+                                current_exclusions.extend(list(set(assignments.values())))
+
+                            csm, score = self.assign_single_account_optimized(account, csm_books, excluded_csms=current_exclusions)
                             if csm:
                                 assignments[account['account_id']] = csm
                                 # Update the csm_books for next account
