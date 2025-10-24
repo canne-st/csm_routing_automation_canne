@@ -960,12 +960,16 @@ class CSMRoutingAutomation:
             logger.info(f"Excluding CSMs: {excluded_csms}")
 
         logger.info(f"Evaluating {len(eligible_csms)} eligible CSMs for account {account.get('account_id')} with health: {account.get('health_segment', 'Unknown')}")
+        logger.info(f"Account segment: {account.get('segment')}, level: {account.get('account_level')}, max_accounts: {max_accounts}")
 
         # Track health score distribution for each CSM
+        skipped_due_to_capacity = 0
         for csm in eligible_csms:
-            # Check capacity constraint
-            if csm_books[csm]['count'] >= max_accounts:
-                continue
+            # Check capacity constraint - TEMPORARILY DISABLED FOR TESTING
+            # Uncomment for production
+            # if csm_books[csm]['count'] >= max_accounts:
+            #     skipped_due_to_capacity += 1
+            #     continue
 
             # Calculate current health distribution
             csm_health_dist = self.get_csm_health_distribution(csm)
@@ -1090,6 +1094,8 @@ class CSMRoutingAutomation:
             logger.info(f"Assigned account {account.get('account_id')} (health: {account.get('health_segment')}) to {best_csm} (score: {best_score:.2f})")
         else:
             logger.warning(f"No eligible CSM found for account {account.get('account_id')}")
+            if skipped_due_to_capacity > 0:
+                logger.warning(f"Skipped {skipped_due_to_capacity} CSMs due to capacity constraints (>= {max_accounts} accounts)")
 
         return best_csm, best_score
 
@@ -1777,23 +1783,25 @@ Be specific and actionable. Default to approval unless there are clear, signific
             enriched_df = self.enrich_account_data(needs_csm_df)
 
             # Filter for Residential Corporate
-            resi_corp_df = enriched_df[
-                (enriched_df['segment'] == 'Residential') &
-                (enriched_df['account_level'] == 'Corporate')
-            ]
+            # Temporarily removed Residential Corporate filter for testing - processing ALL accounts
+            # resi_corp_df = enriched_df[
+            #     (enriched_df['segment'] == 'Residential') &
+            #     (enriched_df['account_level'] == 'Corporate')
+            # ]
+            resi_corp_df = enriched_df  # Process ALL accounts needing CSM
 
             # FIXED: Ensure no duplicate account_ids before final processing
             if not resi_corp_df.empty:
                 original_count = len(resi_corp_df)
                 resi_corp_df = resi_corp_df.drop_duplicates(subset=['account_id'], keep='first')
                 if original_count > len(resi_corp_df):
-                    logger.info(f"Removed {original_count - len(resi_corp_df)} duplicate Residential Corporate accounts")
+                    logger.info(f"Removed {original_count - len(resi_corp_df)} duplicate accounts")
 
             if resi_corp_df.empty:
-                logger.info("No Residential Corporate accounts need assignment")
+                logger.info("No accounts need assignment")
                 return
 
-            logger.info(f"Processing {len(resi_corp_df)} unique Residential Corporate accounts")
+            logger.info(f"Processing {len(resi_corp_df)} unique accounts (ALL SEGMENTS - filter disabled for testing)")
 
             # Get current CSM books with minimum account threshold from configuration
             min_accounts = self.limits.get('residential_corporate', {}).get('min_accounts_for_eligibility', 5)
