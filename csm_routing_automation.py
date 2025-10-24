@@ -992,6 +992,15 @@ class CSMRoutingAutomation:
                 imbalance['tad_variance'] * 0.20
             )
 
+            # Add STRONG penalty for high account counts (scaled to match variance magnitudes)
+            current_count = csm_books[csm]['count']
+            if current_count >= 85:
+                score += (current_count - 84) * 10000000  # 10M penalty per account over 84
+            elif current_count >= 80:
+                score += (current_count - 79) * 1000000   # 1M penalty per account 80-84
+            elif current_count >= 75:
+                score += (current_count - 74) * 100000    # 100K penalty per account 75-79
+
             # Health score color matching and penalties
             account_health = account.get('health_segment', 'Yellow')
             csm_book_info = csm_books.get(csm, {})
