@@ -1363,7 +1363,7 @@ class CSMRoutingAutomation:
                     'total_neediness': csm_info.get('total_neediness', 0),
                     'total_revenue': csm_info.get('total_revenue', 0),
                     'avg_neediness': csm_info.get('total_neediness', 0) / max(csm_info.get('count', 1), 1),
-                    'recent_assignments_7d': recent_recs.get('last_24_hours', 0) * 7,  # Approximation
+                    'recent_assignments_7d': recent_recs.get('actual_assignments', 0),  # Use actual 7-day count
                     'recent_high_neediness': recent_recs.get('avg_neediness_assigned', 0),
                     'tenure_months': csm_info.get('tenure_months', 6),
                     'tenure_category': csm_info.get('tenure_category', 'Mid'),
