@@ -1579,7 +1579,7 @@ class CSMRoutingAutomation:
 
         return issues
 
-    def review_assignments_with_llm(self, assignments: Dict, accounts_df: pd.DataFrame, csm_books: Dict) -> Tuple[bool, str, Dict]:
+    def review_assignments_with_llm(self, assignments: Dict, accounts_df: pd.DataFrame, csm_books: Dict, excluded_csms: list = None) -> Tuple[bool, str, Dict]:
         """
         Comprehensive LLM review with detailed context and specific evaluation criteria
         Returns: (should_rerun, feedback_message, revised_assignments)
@@ -1603,6 +1603,10 @@ class CSMRoutingAutomation:
 
             # Create comprehensive prompt for Claude
             prompt = f"""You are an expert CSM routing analyst. Conduct a thorough review of these account assignments.
+
+## IMPORTANT: EXCLUDED CSMS
+The following CSMs have recent assignments and should NOT be suggested as alternatives:
+{json.dumps(excluded_csms if excluded_csms else [], indent=2)}
 
 ## NEW ASSIGNMENTS DETAIL:
 {json.dumps(convert_numpy_types(assignment_analysis['assignments']), indent=2)}
@@ -1683,7 +1687,7 @@ Respond with a JSON object:
     "feedback": "Specific 1-2 sentence explanation of your decision",
     "critical_issues": ["List of critical problems requiring immediate rebalancing"],
     "warnings": ["List of non-critical concerns to monitor"],
-    "specific_reassignments": {{"account_id": "suggested_csm"}} or null,
+    "specific_reassignments": {{"account_id": "suggested_csm"}} or null,  // IMPORTANT: Do NOT suggest any CSM from the EXCLUDED CSMS list!
     "metrics_summary": {{
         "workload_balance": "good/fair/poor",
         "neediness_distribution": "good/fair/poor",
@@ -1972,7 +1976,7 @@ Be specific and actionable. Default to approval unless there are clear, signific
                 if assignments and self.claude_client:
                     logger.info("Reviewing assignments with Claude Sonnet...")
                     should_rerun, llm_feedback, revised_assignments = self.review_assignments_with_llm(
-                        assignments, resi_corp_df, csm_books
+                        assignments, resi_corp_df, csm_books, excluded_csms=recently_assigned
                     )
 
                     if should_rerun and retry_count < max_retries:
