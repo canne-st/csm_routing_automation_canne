@@ -1149,7 +1149,8 @@ class CSMRoutingAutomation:
             # Additional penalty based on neediness concentration
             if account.get('neediness_score', 0) >= 8:
                 recent_data = self.get_recent_csm_recommendations(csm, 24)
-                if recent_data.get('avg_neediness_assigned', 0) > 7:
+                avg_neediness = recent_data.get('avg_neediness_assigned')
+                if avg_neediness is not None and avg_neediness > 7:
                     # Higher penalty for junior CSMs getting multiple high neediness
                     if tenure_category in ['New', 'Junior']:
                         score += 50
