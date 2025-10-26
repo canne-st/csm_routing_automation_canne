@@ -1930,6 +1930,14 @@ Be specific and actionable. Default to approval unless there are clear, signific
                     num_accounts_processing=len(resi_corp_df)
                 )
 
+                # Check if all eligible CSMs would be excluded
+                eligible_count = len([csm for csm in self.eligible_csm_list if csm in csm_books])
+                excluded_count = len(recently_assigned)
+
+                if excluded_count >= eligible_count and eligible_count > 0:
+                    logger.warning(f"⚠️  All {eligible_count} eligible CSMs would be excluded. Bypassing exclusion to allow assignment.")
+                    recently_assigned = []  # Reset exclusion list
+
                 # Process based on batch size
                 if len(resi_corp_df) == 1:
                     # Single account - use optimized best fit
