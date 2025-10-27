@@ -967,14 +967,84 @@ class CSMRoutingAutomation:
 
         return list(recently_assigned)
 
-    def calculate_assignment_recency_penalty(self, csm_name: str) -> float:
+    def cache_all_csm_recency_data(self, csm_list: list) -> Dict:
+        """
+        Bulk fetch recency data for all CSMs at once to avoid repeated queries
+        Returns a dictionary with recency data for each CSM
+        """
+        if not csm_list:
+            return {}
+
+        logger.info(f"Bulk fetching recency data for {len(csm_list)} CSMs...")
+
+        # Build a single query to get all CSM recency data at once
+        csm_names_str = "', '".join(csm_list)
+        query = f"""
+        SELECT
+            recommended_csm as csm_name,
+            COUNT(*) as total_recommendations,
+            COUNT(CASE WHEN recommendation_timestamp >= DATEADD(hour, -1, CURRENT_TIMESTAMP()) THEN 1 END) as last_1_hour,
+            COUNT(CASE WHEN recommendation_timestamp >= DATEADD(hour, -4, CURRENT_TIMESTAMP()) THEN 1 END) as last_4_hours,
+            COUNT(CASE WHEN recommendation_timestamp >= DATEADD(hour, -24, CURRENT_TIMESTAMP()) THEN 1 END) as last_24_hours,
+            COUNT(CASE WHEN recommendation_timestamp >= DATEADD(day, -7, CURRENT_TIMESTAMP()) THEN 1 END) as last_7_days,
+            AVG(neediness_score) as avg_neediness
+        FROM {self.recommendations_table}
+        WHERE recommended_csm IN ('{csm_names_str}')
+          AND recommendation_timestamp >= DATEADD(day, -7, CURRENT_TIMESTAMP())
+        GROUP BY recommended_csm
+        """
+
+        try:
+            cursor = self.snowflake_conn.cursor()
+            cursor.execute(query)
+            results = cursor.fetchall()
+
+            # Build the cache dictionary
+            recency_cache = {}
+
+            # Initialize all CSMs with zero values
+            for csm in csm_list:
+                recency_cache[csm] = {
+                    'total_recommendations': 0,
+                    'last_1_hour': 0,
+                    'last_4_hours': 0,
+                    'last_24_hours': 0,
+                    'recent_assignments_7d': 0,
+                    'avg_neediness_assigned': 0
+                }
+
+            # Update with actual data
+            for row in results:
+                csm_name = row[0]
+                if csm_name in recency_cache:
+                    recency_cache[csm_name] = {
+                        'total_recommendations': row[1],
+                        'last_1_hour': row[2],
+                        'last_4_hours': row[3],
+                        'last_24_hours': row[4],
+                        'recent_assignments_7d': row[5],
+                        'avg_neediness_assigned': row[6] if row[6] else 0
+                    }
+
+            logger.info(f"Cached recency data for {len(recency_cache)} CSMs")
+            return recency_cache
+
+        except Exception as e:
+            logger.error(f"Failed to cache recency data: {str(e)}")
+            return {}
+
+    def calculate_assignment_recency_penalty(self, csm_name: str, recency_data: Dict = None) -> float:
         """
         Calculate penalty based on how recently CSM received recommendations from the database
         Returns higher penalty for more recent/frequent recommendations
         Uses exponential scaling to strongly discourage repeated assignments
+        Can use cached data if provided to avoid repeated queries
         """
-        # Get recent recommendations from database
-        recent_data = self.get_recent_csm_recommendations(csm_name, 24)
+        # Use cached data if available, otherwise query database
+        if recency_data and csm_name in recency_data:
+            recent_data = recency_data[csm_name]
+        else:
+            recent_data = self.get_recent_csm_recommendations(csm_name, 24)
 
         # Calculate weighted penalty with exponential scaling
         penalty = 0
@@ -1065,6 +1135,9 @@ class CSMRoutingAutomation:
 
         logger.info(f"Evaluating {len(eligible_csms)} eligible CSMs for account {account.get('account_id')} with health: {account.get('health_segment', 'Unknown')}")
         logger.info(f"Account segment: {account.get('segment')}, level: {account.get('account_level')}, max_accounts: {max_accounts}")
+
+        # Cache all CSM recency data at once to avoid repeated queries
+        recency_cache = self.cache_all_csm_recency_data(eligible_csms)
 
         # Track health score distribution for each CSM
         skipped_due_to_capacity = 0
@@ -1161,13 +1234,13 @@ class CSMRoutingAutomation:
                 current_count = csm_book_info.get('count', 0)
                 if current_count > 40:
                     score += 50  # Penalty if new CSM already has many accounts
-                # Check recent assignments for new CSMs
-                recent_data = self.get_recent_csm_recommendations(csm, 24)
+                # Check recent assignments for new CSMs using cached data
+                recent_data = recency_cache.get(csm, {})
                 if recent_data.get('last_24_hours', 0) > 2:
                     score += 100  # Heavy penalty for overloading new CSMs
 
-            # Add STRONG penalty for recent recommendations
-            recency_penalty = self.calculate_assignment_recency_penalty(csm)
+            # Add STRONG penalty for recent recommendations using cached data
+            recency_penalty = self.calculate_assignment_recency_penalty(csm, recency_cache)
 
             # Multiply base recency penalty to make it more impactful
             recency_penalty *= 2.0  # Double the impact of recency
@@ -1182,7 +1255,7 @@ class CSMRoutingAutomation:
 
             # Additional penalty based on neediness concentration
             if account.get('neediness_score', 0) >= 8:
-                recent_data = self.get_recent_csm_recommendations(csm, 24)
+                recent_data = recency_cache.get(csm, {})
                 avg_neediness = recent_data.get('avg_neediness_assigned')
                 if avg_neediness is not None and avg_neediness > 7:
                     # Higher penalty for junior CSMs getting multiple high neediness
@@ -1200,7 +1273,7 @@ class CSMRoutingAutomation:
                 'recency_penalty': recency_penalty,
                 'current_accounts': csm_books[csm]['count'],
                 'health_dist': csm_health_dist,
-                'recent_assignments_24h': self.get_recent_csm_recommendations(csm, 24).get('last_24_hours', 0)
+                'recent_assignments_24h': recency_cache.get(csm, {}).get('last_24_hours', 0)
             })
 
             if score < best_score:
@@ -1251,6 +1324,9 @@ class CSMRoutingAutomation:
         if excluded_csms:
             eligible_csms = [csm for csm in eligible_csms if csm not in excluded_csms]
             logger.info(f"Excluding CSMs from batch optimization: {excluded_csms}")
+
+        # Cache all CSM recency data at once to avoid repeated queries
+        recency_cache = self.cache_all_csm_recency_data(eligible_csms)
 
         # Get health distributions for all CSMs
         csm_health_dists = {}
@@ -1335,9 +1411,9 @@ class CSMRoutingAutomation:
         revenue_variance = 0
         tad_variance = 0
 
-        # Add recency penalties to objective (NEW CONSTRAINT)
+        # Add recency penalties to objective using cached data
         recency_penalties = pulp.lpSum([
-            x[i, csm] * self.calculate_assignment_recency_penalty(csm)
+            x[i, csm] * self.calculate_assignment_recency_penalty(csm, recency_cache)
             for i in accounts_df.index
             for csm in eligible_csms
             if (i, csm) in x
