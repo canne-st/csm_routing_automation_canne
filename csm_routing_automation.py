@@ -1213,12 +1213,16 @@ class CSMRoutingAutomation:
 
             # Add STRONG penalty for high account counts (scaled to match variance magnitudes)
             current_count = csm_books[csm]['count']
-            if current_count >= 85:
-                score += (current_count - 84) * 10000000  # 10M penalty per account over 84
-            elif current_count >= 80:
-                score += (current_count - 79) * 1000000   # 1M penalty per account 80-84
-            elif current_count >= 75:
-                score += (current_count - 74) * 100000    # 100K penalty per account 75-79
+            # Get max limit from config (default to 105 for residential_corporate)
+            max_accounts = self.limits.get('residential_corporate', {}).get('max_accounts_per_csm', 105)
+            warning_threshold = max_accounts - 5  # Start warning 5 accounts before max
+
+            if current_count >= max_accounts:
+                score += (current_count - (max_accounts - 1)) * 10000000  # 10M penalty per account over limit
+            elif current_count >= warning_threshold:
+                score += (current_count - (warning_threshold - 1)) * 1000000   # 1M penalty per account near limit
+            elif current_count >= (warning_threshold - 10):
+                score += (current_count - (warning_threshold - 11)) * 100000    # 100K penalty per account approaching limit
 
             # Health score color matching and penalties
             account_health = account.get('health_segment', 'Yellow')
@@ -1660,7 +1664,8 @@ class CSMRoutingAutomation:
             'revenue_std': np.std(proj_revenue),
             'revenue_mean': np.mean(proj_revenue),
             'csms_over_80_accounts': sum(1 for c in proj_counts if c > 80),
-            'csms_at_max_capacity': sum(1 for c in proj_counts if c >= 85)
+            # Use max_accounts from config instead of hardcoded 85
+            'csms_at_max_capacity': sum(1 for c in proj_counts if c >= self.limits.get('residential_corporate', {}).get('max_accounts_per_csm', 105))
         }
 
         # Projected health distribution
@@ -1690,10 +1695,11 @@ class CSMRoutingAutomation:
 
         # Check for overloaded CSMs
         if metrics['projected']['csms_at_max_capacity'] > 0:
+            max_accounts = self.limits.get('residential_corporate', {}).get('max_accounts_per_csm', 105)
             issues.append({
                 'type': 'CAPACITY_EXCEEDED',
                 'severity': 'CRITICAL',
-                'detail': f"{metrics['projected']['csms_at_max_capacity']} CSMs will exceed maximum capacity of 85 accounts"
+                'detail': f"{metrics['projected']['csms_at_max_capacity']} CSMs will exceed maximum capacity of {max_accounts} accounts"
             })
 
         # Check neediness variance increase
@@ -1814,7 +1820,7 @@ After Assignment:
 1. **Workload Balance** (Critical):
    - Is the standard deviation of account counts > 20% of mean?
    - Are any CSMs getting > 3 accounts in this batch?
-   - Will any CSM exceed 85 accounts?
+   - Will any CSM exceed their maximum capacity (from config)?
 
 2. **CSM Tenure & Experience Matching** (Critical):
    - Are Red accounts going to experienced CSMs (Senior/Expert)?
