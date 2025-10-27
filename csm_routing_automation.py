@@ -971,31 +971,44 @@ class CSMRoutingAutomation:
         """
         Calculate penalty based on how recently CSM received recommendations from the database
         Returns higher penalty for more recent/frequent recommendations
+        Uses exponential scaling to strongly discourage repeated assignments
         """
         # Get recent recommendations from database
         recent_data = self.get_recent_csm_recommendations(csm_name, 24)
 
-        # Calculate weighted penalty
+        # Calculate weighted penalty with exponential scaling
         penalty = 0
 
-        # Heavy penalty for very recent recommendations (last hour)
+        # VERY heavy exponential penalty for very recent recommendations (last hour)
         if recent_data['last_1_hour'] > 0:
-            penalty += recent_data['last_1_hour'] * 100  # Each recommendation in last hour adds 100 penalty
+            # Exponential penalty: 500 for 1, 2000 for 2, 4500 for 3, etc.
+            penalty += 500 * (recent_data['last_1_hour'] ** 2)
 
-        # Medium penalty for recommendations in last 4 hours
+        # Heavy penalty for recommendations in last 4 hours
         last_4_hours_excluding_1 = recent_data['last_4_hours'] - recent_data['last_1_hour']
         if last_4_hours_excluding_1 > 0:
-            penalty += last_4_hours_excluding_1 * 25   # Each recommendation in last 4 hours adds 25 penalty
+            # Exponential penalty: 100 for 1, 400 for 2, 900 for 3, etc.
+            penalty += 100 * (last_4_hours_excluding_1 ** 2)
 
-        # Light penalty for recommendations in last 24 hours
+        # Medium penalty for recommendations in last 24 hours
         last_24_hours_excluding_4 = recent_data['last_24_hours'] - recent_data['last_4_hours']
         if last_24_hours_excluding_4 > 0:
-            penalty += last_24_hours_excluding_4 * 5   # Each recommendation in last 24 hours adds 5 penalty
+            # Progressive penalty: 20 for 1, 80 for 2, 180 for 3, etc.
+            penalty += 20 * (last_24_hours_excluding_4 ** 2)
+
+        # Additional penalty based on total recent assignments (7 days)
+        recent_7d = recent_data.get('recent_assignments_7d', 0)
+        if recent_7d > 5:
+            # Strong penalty for CSMs with many assignments in past week
+            penalty += 50 * (recent_7d - 5)  # 50 penalty per assignment over 5
 
         # Additional penalty if CSM has high average neediness score assignments
         avg_neediness = recent_data.get('avg_neediness_assigned')
         if avg_neediness and avg_neediness > 7:
-            penalty += 20  # Extra penalty if CSM is getting high neediness accounts
+            penalty += 50  # Increased penalty if CSM is getting high neediness accounts
+
+        # Log the penalty calculation for debugging
+        logger.debug(f"Recency penalty for {csm_name}: {penalty} (1hr:{recent_data['last_1_hour']}, 4hr:{last_4_hours_excluding_1}, 24hr:{last_24_hours_excluding_4}, 7d:{recent_7d})")
 
         return penalty
 
@@ -1150,14 +1163,17 @@ class CSMRoutingAutomation:
                 if recent_data.get('last_24_hours', 0) > 2:
                     score += 100  # Heavy penalty for overloading new CSMs
 
-            # Add penalty for recent recommendations
+            # Add STRONG penalty for recent recommendations
             recency_penalty = self.calculate_assignment_recency_penalty(csm)
 
-            # Reduce recency penalty for experienced CSMs (they can handle more)
+            # Multiply base recency penalty to make it more impactful
+            recency_penalty *= 2.0  # Double the impact of recency
+
+            # Adjust based on tenure (experienced CSMs can handle slightly more)
             if tenure_months >= 24:
-                recency_penalty *= 0.7  # 30% reduction for expert CSMs
+                recency_penalty *= 0.8  # 20% reduction for expert CSMs
             elif tenure_months < 6:
-                recency_penalty *= 1.3  # 30% increase for new/junior CSMs
+                recency_penalty *= 1.5  # 50% increase for new/junior CSMs
 
             score += recency_penalty
 
@@ -1307,13 +1323,13 @@ class CSMRoutingAutomation:
             if (i, csm) in x
         ])
 
-        # Combined objective with weights
+        # Combined objective with weights - INCREASED recency penalty weight
         prob += (
-            0.25 * count_variance +
-            0.25 * neediness_variance +
-            0.20 * revenue_variance +
-            0.20 * tad_variance +
-            0.10 * recency_penalties  # Add recency penalty component
+            0.20 * count_variance +
+            0.20 * neediness_variance +
+            0.15 * revenue_variance +
+            0.15 * tad_variance +
+            0.30 * recency_penalties  # INCREASED recency penalty weight to 30%
         )
 
         # Solve the optimization
