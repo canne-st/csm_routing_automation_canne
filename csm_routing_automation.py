@@ -1373,9 +1373,13 @@ class CSMRoutingAutomation:
             eligible_csms = [csm for csm in eligible_csms if csm not in excluded_csms]
             logger.info(f"Excluding CSMs from batch optimization: {excluded_csms}")
 
+        # Get max accounts limit from config
+        segment_level = "residential_corporate"  # Default for now
+        max_accounts = self.limits.get(segment_level, {}).get('max_accounts_per_csm', 85)
+
         # PRE-FILTER: Remove CSMs who don't have enough capacity for batch assignment
         # This prevents infeasibility when CSMs are already near/at their limits
-        batch_size = len(accounts)
+        batch_size = len(accounts_df)
         min_capacity_needed = 2 if batch_size > 5 else 1  # Need at least 2 spots for larger batches
 
         eligible_with_capacity = []
@@ -1415,9 +1419,7 @@ class CSMRoutingAutomation:
                 prob += pulp.lpSum(valid_vars) == 1
 
         # Constraint: Respect CSM capacity limits
-        segment_level = "residential_corporate"  # Default for now
-        max_accounts = self.limits.get(segment_level, {}).get('max_accounts_per_csm', 85)
-
+        # (max_accounts already defined above for pre-filtering)
         for csm in eligible_csms:
             current_count = csm_books[csm]['count']
             new_assignments = pulp.lpSum([x[i, csm] for i in accounts_df.index if (i, csm) in x])
