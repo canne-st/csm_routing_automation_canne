@@ -571,24 +571,30 @@ final_customer_data AS (
         churn_stage,
         time_zone,
         ROUND(
-            "Industry Rating" + tadscore_rating + HEALTHSCORE_Rating + "TAD Rating" +
-            ProProduct_Rating + Calls_rating + Email_rating + Triage_Rating +
-            Support_rating + (CASE WHEN related_tenants > 2 THEN 1 ELSE 0 END)
+            "Industry Rating" 
+            + HEALTHSCORE_Rating 
+            + "TAD Rating" 
+            + ProProduct_Rating 
+            + Calls_rating 
+            + Email_rating
+            + Triage_Rating 
+            + Support_rating 
+            + (CASE WHEN related_tenants > 2 THEN 1 ELSE 0 END)
         ) AS "Neediness Score",
         CASE
             WHEN ROUND(
-                "Industry Rating" + tadscore_rating + HEALTHSCORE_Rating + "TAD Rating" +
-                ProProduct_Rating + Calls_rating + Email_rating + Triage_Rating +
+                "Industry Rating"  + HEALTHSCORE_Rating + "TAD Rating" +
+                ProProduct_Rating + Calls_rating + Email_rating + Triage_Rating + 
                 Support_rating + (CASE WHEN related_tenants > 2 THEN 1 ELSE 0 END)
             ) <= 4 THEN 'Low'
             WHEN ROUND(
-                "Industry Rating" + tadscore_rating + HEALTHSCORE_Rating + "TAD Rating" +
-                ProProduct_Rating + Calls_rating + Email_rating + Triage_Rating +
+                "Industry Rating"  + HEALTHSCORE_Rating + "TAD Rating" +
+                ProProduct_Rating + Calls_rating + Email_rating + Triage_Rating + 
                 Support_rating + (CASE WHEN related_tenants > 2 THEN 1 ELSE 0 END)
             ) BETWEEN 5 AND 7 THEN 'Medium'
             WHEN ROUND(
-                "Industry Rating" + tadscore_rating + HEALTHSCORE_Rating + "TAD Rating" +
-                ProProduct_Rating + Calls_rating + Email_rating + Triage_Rating +
+                "Industry Rating"  + HEALTHSCORE_Rating + "TAD Rating" +
+                ProProduct_Rating + Calls_rating + Email_rating + Triage_Rating + 
                 Support_rating + (CASE WHEN related_tenants > 2 THEN 1 ELSE 0 END)
             ) >= 8 THEN 'High'
             ELSE NULL
