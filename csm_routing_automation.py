@@ -1373,6 +1373,27 @@ class CSMRoutingAutomation:
             eligible_csms = [csm for csm in eligible_csms if csm not in excluded_csms]
             logger.info(f"Excluding CSMs from batch optimization: {excluded_csms}")
 
+        # PRE-FILTER: Remove CSMs who don't have enough capacity for batch assignment
+        # This prevents infeasibility when CSMs are already near/at their limits
+        batch_size = len(accounts)
+        min_capacity_needed = 2 if batch_size > 5 else 1  # Need at least 2 spots for larger batches
+
+        eligible_with_capacity = []
+        for csm in eligible_csms:
+            current_count = csm_books[csm]['count']
+            available_capacity = max_accounts - current_count
+            if available_capacity >= min_capacity_needed:
+                eligible_with_capacity.append(csm)
+            else:
+                logger.debug(f"Excluding {csm} from batch: only {available_capacity} spots available (need {min_capacity_needed})")
+
+        eligible_csms = eligible_with_capacity
+
+        if len(eligible_csms) < batch_size:
+            logger.warning(f"Not enough eligible CSMs with capacity ({len(eligible_csms)}) for batch of {batch_size} accounts")
+            # Fall back to individual assignment if not enough CSMs
+            return pd.DataFrame()
+
         # Cache all CSM recency data at once to avoid repeated queries
         recency_cache = self.cache_all_csm_recency_data(eligible_csms)
 
