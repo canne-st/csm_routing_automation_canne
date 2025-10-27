@@ -1038,15 +1038,18 @@ class CSMRoutingAutomation:
             'tad_std': np.std(metrics['tad'])
         }
 
-    def assign_single_account_optimized(self, account: pd.Series, csm_books: Dict, excluded_csms: list = None) -> Tuple[str, float]:
+    def assign_single_account_optimized(self, account: pd.Series, csm_books: Dict, excluded_csms: list = None) -> Tuple[str, float, list]:
         """
         Assign single account using optimization logic
         Considers book balance, health score distribution, and recent recommendations
-        Returns: (best_csm, optimization_score)
+        Returns: (best_csm, optimization_score, top_alternatives_with_scores)
         """
         best_csm = None
         best_score = float('inf')
         run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Track all CSM scores for ranking
+        all_csm_scores = []
 
         # Get eligible CSMs based on account segment and level
         segment_level = f"{account.get('segment', 'Residential').lower().replace(' & construction', '').replace(' ', '_')}_{account.get('account_level', 'Corporate').lower()}"
@@ -1190,9 +1193,25 @@ class CSMRoutingAutomation:
 
             logger.debug(f"CSM {csm}: score={score:.2f}, recency_penalty={recency_penalty:.2f}, health_dist={csm_health_dist}")
 
+            # Track all CSM scores for alternatives
+            all_csm_scores.append({
+                'csm': csm,
+                'score': score,
+                'recency_penalty': recency_penalty,
+                'current_accounts': csm_books[csm]['count'],
+                'health_dist': csm_health_dist,
+                'recent_assignments_24h': self.get_recent_csm_recommendations(csm, 24).get('last_24_hours', 0)
+            })
+
             if score < best_score:
                 best_score = score
                 best_csm = csm
+
+        # Sort CSMs by score to get top alternatives
+        all_csm_scores.sort(key=lambda x: x['score'])
+
+        # Get top 5 alternatives (excluding the best one, but including it in the list for LLM to see)
+        top_alternatives = all_csm_scores[:6]  # Get top 6 (best + 5 alternatives)
 
         # Store the recommendation in the database
         if best_csm:
@@ -1206,12 +1225,13 @@ class CSMRoutingAutomation:
                 batch_size=1
             )
             logger.info(f"Assigned account {account.get('account_id')} (health: {account.get('health_segment')}) to {best_csm} (score: {best_score:.2f})")
+            logger.info(f"Top alternatives: {[alt['csm'] for alt in top_alternatives[:5]]}")
         else:
             logger.warning(f"No eligible CSM found for account {account.get('account_id')}")
             if skipped_due_to_capacity > 0:
                 logger.warning(f"Skipped {skipped_due_to_capacity} CSMs due to capacity constraints (>= {max_accounts} accounts)")
 
-        return best_csm, best_score
+        return best_csm, best_score, top_alternatives
 
     def optimize_batch_with_pulp(self, accounts_df: pd.DataFrame, csm_books: Dict, excluded_csms: list = None) -> Dict:
         """
@@ -1617,12 +1637,37 @@ class CSMRoutingAutomation:
             # Identify potential issues
             issues = self._identify_potential_issues(assignment_analysis, metrics_analysis)
 
+            # Prepare alternatives for each account
+            alternatives_info = {}
+            if hasattr(self, 'assignment_alternatives'):
+                for account_id, alternatives in self.assignment_alternatives.items():
+                    if alternatives:
+                        # Get top 5 alternatives (or fewer if not available)
+                        top_5 = alternatives[:5]
+                        alternatives_info[account_id] = [
+                            {
+                                'csm': alt['csm'],
+                                'score': round(alt['score'], 2),
+                                'current_accounts': alt['current_accounts'],
+                                'recent_24h': alt['recent_assignments_24h'],
+                                'health_mix': alt['health_dist']
+                            }
+                            for alt in top_5
+                        ]
+
             # Create comprehensive prompt for Claude
             prompt = f"""You are an expert CSM routing analyst. Conduct a thorough review of these account assignments.
 
 ## IMPORTANT: EXCLUDED CSMS
 The following CSMs have recent assignments and should NOT be suggested as alternatives:
 {json.dumps(excluded_csms if excluded_csms else [], indent=2)}
+
+## TOP ALTERNATIVE CSM OPTIONS FOR EACH ACCOUNT:
+{json.dumps(convert_numpy_types(alternatives_info), indent=2)}
+
+**Note**: The CSMs are ranked by optimization score (lower is better). The first CSM in each list is the current assignment.
+You should ONLY suggest changes if there's a significantly better alternative from this list.
+Choose from these top 5 alternatives to ensure diversity and avoid repeatedly assigning the same CSMs.
 
 ## NEW ASSIGNMENTS DETAIL:
 {json.dumps(convert_numpy_types(assignment_analysis['assignments']), indent=2)}
@@ -1703,7 +1748,7 @@ Respond with a JSON object:
     "feedback": "Specific 1-2 sentence explanation of your decision",
     "critical_issues": ["List of critical problems requiring immediate rebalancing"],
     "warnings": ["List of non-critical concerns to monitor"],
-    "specific_reassignments": {{"account_id": "suggested_csm"}} or null,  // IMPORTANT: Do NOT suggest any CSM from the EXCLUDED CSMS list!
+    "specific_reassignments": {{"account_id": "suggested_csm"}} or null,  // IMPORTANT: You MUST select from the TOP ALTERNATIVE CSM OPTIONS provided above! Pick the 2nd, 3rd, 4th, or 5th best alternative to ensure diversity. Do NOT suggest any CSM from the EXCLUDED CSMS list!
     "metrics_summary": {{
         "workload_balance": "good/fair/poor",
         "neediness_distribution": "good/fair/poor",
@@ -1711,6 +1756,13 @@ Respond with a JSON object:
         "overall_quality": "good/fair/poor"
     }}
 }}
+
+CRITICAL RULES FOR REASSIGNMENTS:
+1. You MUST ONLY suggest CSMs from the "TOP ALTERNATIVE CSM OPTIONS" section above
+2. Prefer the 2nd, 3rd, or 4th best alternatives over the 1st to ensure diversity
+3. If the same CSM appears as #1 for multiple accounts, distribute to alternatives
+4. NEVER suggest CSMs from the EXCLUDED CSMS list
+5. If no good alternative exists in the top 5, approve the original assignment
 
 Be specific and actionable. Default to approval unless there are clear, significant problems."""
 
@@ -1959,9 +2011,13 @@ Be specific and actionable. Default to approval unless there are clear, signific
                     # Single account - use optimized best fit
                     logger.info("Processing single account with optimized best fit")
                     account = resi_corp_df.iloc[0]
-                    csm, score = self.assign_single_account_optimized(account, csm_books, excluded_csms=recently_assigned)
+                    csm, score, top_alternatives = self.assign_single_account_optimized(account, csm_books, excluded_csms=recently_assigned)
                     if csm:
                         assignments[account['account_id']] = csm
+                        # Store alternatives for LLM review
+                        if not hasattr(self, 'assignment_alternatives'):
+                            self.assignment_alternatives = {}
+                        self.assignment_alternatives[account['account_id']] = top_alternatives
                         # Update the csm_books for next iteration
                         csm_books[csm]['count'] += 1
                         csm_books[csm]['total_neediness'] += account.get('neediness_score', 0)
@@ -1982,9 +2038,13 @@ Be specific and actionable. Default to approval unless there are clear, signific
                             if assignments:
                                 current_exclusions.extend(list(set(assignments.values())))
 
-                            csm, score = self.assign_single_account_optimized(account, csm_books, excluded_csms=current_exclusions)
+                            csm, score, top_alternatives = self.assign_single_account_optimized(account, csm_books, excluded_csms=current_exclusions)
                             if csm:
                                 assignments[account['account_id']] = csm
+                                # Store alternatives for LLM review
+                                if not hasattr(self, 'assignment_alternatives'):
+                                    self.assignment_alternatives = {}
+                                self.assignment_alternatives[account['account_id']] = top_alternatives
                                 # Update the csm_books for next account
                                 csm_books[csm]['count'] += 1
                                 csm_books[csm]['total_neediness'] += account.get('neediness_score', 0)
