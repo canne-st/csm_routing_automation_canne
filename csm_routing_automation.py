@@ -707,19 +707,40 @@ class CSMRoutingAutomation:
             logger.error(f"Failed to create recommendations table: {str(e)}")
 
     def get_recent_csm_recommendations(self, csm_name: str, hours: int = 4) -> Dict:
-        """Get recent recommendations for a CSM from the database"""
+        """Get recent recommendations AND actual assignments for a CSM from the database"""
+        # CRITICAL FIX: Check BOTH recommendations AND actual assignments
         query = f"""
+        WITH all_assignments AS (
+            -- Get recommendations from recommendations table
+            SELECT
+                recommendation_timestamp as timestamp,
+                neediness_score,
+                'recommendation' as source_type
+            FROM {self.recommendations_table}
+            WHERE recommended_csm = '{csm_name}'
+                AND recommendation_timestamp >= DATEADD(hour, -{hours}, CURRENT_TIMESTAMP())
+
+            UNION ALL
+
+            -- ALSO get actual assignments from assignments table
+            -- Note: assignments table doesn't have neediness_score
+            SELECT
+                assignment_date as timestamp,
+                NULL as neediness_score,  -- assignments table doesn't have this column
+                'assignment' as source_type
+            FROM {self.assignments_table}
+            WHERE csm_name = '{csm_name}'
+                AND assignment_date >= DATEADD(hour, -{hours}, CURRENT_TIMESTAMP())
+        )
         SELECT
             COUNT(*) as total_recommendations,
-            COUNT(CASE WHEN recommendation_timestamp >= DATEADD(hour, -1, CURRENT_TIMESTAMP()) THEN 1 END) as last_1_hour,
-            COUNT(CASE WHEN recommendation_timestamp >= DATEADD(hour, -4, CURRENT_TIMESTAMP()) THEN 1 END) as last_4_hours,
-            COUNT(CASE WHEN recommendation_timestamp >= DATEADD(hour, -24, CURRENT_TIMESTAMP()) THEN 1 END) as last_24_hours,
-            MAX(recommendation_timestamp) as most_recent_recommendation,
-            AVG(neediness_score) as avg_neediness_assigned,
-            SUM(CASE WHEN was_assigned = TRUE THEN 1 ELSE 0 END) as actual_assignments
-        FROM {self.recommendations_table}
-        WHERE recommended_csm = '{csm_name}'
-            AND recommendation_timestamp >= DATEADD(hour, -{hours}, CURRENT_TIMESTAMP())
+            COUNT(CASE WHEN timestamp >= DATEADD(hour, -1, CURRENT_TIMESTAMP()) THEN 1 END) as last_1_hour,
+            COUNT(CASE WHEN timestamp >= DATEADD(hour, -4, CURRENT_TIMESTAMP()) THEN 1 END) as last_4_hours,
+            COUNT(CASE WHEN timestamp >= DATEADD(hour, -24, CURRENT_TIMESTAMP()) THEN 1 END) as last_24_hours,
+            MAX(timestamp) as most_recent_recommendation,
+            AVG(neediness_score) as avg_neediness_assigned,  -- will be NULL-aware average
+            SUM(CASE WHEN source_type = 'assignment' THEN 1 ELSE 0 END) as actual_assignments
+        FROM all_assignments
         """
 
         try:
@@ -978,20 +999,41 @@ class CSMRoutingAutomation:
         logger.info(f"Bulk fetching recency data for {len(csm_list)} CSMs...")
 
         # Build a single query to get all CSM recency data at once
+        # CRITICAL: Check BOTH recommendations AND actual assignments tables
         csm_names_str = "', '".join(csm_list)
         query = f"""
+        WITH all_assignments AS (
+            -- Get recommendations from recommendations table
+            SELECT
+                recommended_csm as csm_name,
+                recommendation_timestamp as timestamp,
+                neediness_score
+            FROM {self.recommendations_table}
+            WHERE recommended_csm IN ('{csm_names_str}')
+              AND recommendation_timestamp >= DATEADD(day, -7, CURRENT_TIMESTAMP())
+
+            UNION ALL
+
+            -- ALSO get actual assignments from assignments table (CRITICAL FIX!)
+            -- Note: assignments table doesn't have neediness_score, use NULL
+            SELECT
+                csm_name,
+                assignment_date as timestamp,
+                NULL as neediness_score  -- assignments table doesn't have this column
+            FROM {self.assignments_table}
+            WHERE csm_name IN ('{csm_names_str}')
+              AND assignment_date >= DATEADD(day, -7, CURRENT_TIMESTAMP())
+        )
         SELECT
-            recommended_csm as csm_name,
+            csm_name,
             COUNT(*) as total_recommendations,
-            COUNT(CASE WHEN recommendation_timestamp >= DATEADD(hour, -1, CURRENT_TIMESTAMP()) THEN 1 END) as last_1_hour,
-            COUNT(CASE WHEN recommendation_timestamp >= DATEADD(hour, -4, CURRENT_TIMESTAMP()) THEN 1 END) as last_4_hours,
-            COUNT(CASE WHEN recommendation_timestamp >= DATEADD(hour, -24, CURRENT_TIMESTAMP()) THEN 1 END) as last_24_hours,
-            COUNT(CASE WHEN recommendation_timestamp >= DATEADD(day, -7, CURRENT_TIMESTAMP()) THEN 1 END) as last_7_days,
-            AVG(neediness_score) as avg_neediness
-        FROM {self.recommendations_table}
-        WHERE recommended_csm IN ('{csm_names_str}')
-          AND recommendation_timestamp >= DATEADD(day, -7, CURRENT_TIMESTAMP())
-        GROUP BY recommended_csm
+            COUNT(CASE WHEN timestamp >= DATEADD(hour, -1, CURRENT_TIMESTAMP()) THEN 1 END) as last_1_hour,
+            COUNT(CASE WHEN timestamp >= DATEADD(hour, -4, CURRENT_TIMESTAMP()) THEN 1 END) as last_4_hours,
+            COUNT(CASE WHEN timestamp >= DATEADD(hour, -24, CURRENT_TIMESTAMP()) THEN 1 END) as last_24_hours,
+            COUNT(CASE WHEN timestamp >= DATEADD(day, -7, CURRENT_TIMESTAMP()) THEN 1 END) as last_7_days,
+            AVG(neediness_score) as avg_neediness  -- will be NULL for assignments, that's ok
+        FROM all_assignments
+        GROUP BY csm_name
         """
 
         try:
@@ -1049,22 +1091,22 @@ class CSMRoutingAutomation:
         # Calculate weighted penalty with exponential scaling
         penalty = 0
 
-        # VERY heavy exponential penalty for very recent recommendations (last hour)
+        # EXTREME exponential penalty for very recent recommendations (last hour)
         if recent_data['last_1_hour'] > 0:
-            # Exponential penalty: 500 for 1, 2000 for 2, 4500 for 3, etc.
-            penalty += 500 * (recent_data['last_1_hour'] ** 2)
+            # Massive penalty: 1M for 1, 4M for 2, 9M for 3, etc.
+            penalty += 1000000 * (recent_data['last_1_hour'] ** 2)
 
-        # Heavy penalty for recommendations in last 4 hours
+        # Very heavy penalty for recommendations in last 4 hours
         last_4_hours_excluding_1 = recent_data['last_4_hours'] - recent_data['last_1_hour']
         if last_4_hours_excluding_1 > 0:
-            # Exponential penalty: 100 for 1, 400 for 2, 900 for 3, etc.
-            penalty += 100 * (last_4_hours_excluding_1 ** 2)
+            # Heavy penalty: 100K for 1, 400K for 2, 900K for 3, etc.
+            penalty += 100000 * (last_4_hours_excluding_1 ** 2)
 
-        # Medium penalty for recommendations in last 24 hours
+        # Heavy penalty for recommendations in last 24 hours
         last_24_hours_excluding_4 = recent_data['last_24_hours'] - recent_data['last_4_hours']
         if last_24_hours_excluding_4 > 0:
-            # Progressive penalty: 20 for 1, 80 for 2, 180 for 3, etc.
-            penalty += 20 * (last_24_hours_excluding_4 ** 2)
+            # Strong penalty: 10K for 1, 40K for 2, 90K for 3, 160K for 4, etc.
+            penalty += 10000 * (last_24_hours_excluding_4 ** 2)
 
         # Additional penalty based on total recent assignments (7 days)
         recent_7d = recent_data.get('recent_assignments_7d', 0)
