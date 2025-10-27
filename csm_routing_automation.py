@@ -208,6 +208,8 @@ class CSMRoutingAutomation:
         FROM DSV_SHARE.PUBLIC.VW_ONBOARDING_DETAIL
         WHERE success_transition_status_ob = 'Needs CSM'
             AND account_id_ob IS NOT NULL
+            and ob_account_level_ce = 'Corporate'
+            and ob_team_segment = 'Residential'
             AND onboarding_status_ob in ('Success', 'Onboarding', 'Live')
             -- Exclude accounts already in recommendations table
             AND account_id_ob NOT IN (
@@ -2042,12 +2044,159 @@ Be specific and actionable. Default to approval unless there are clear, signific
             self.snowflake_conn.commit()
             cursor.close()
             logger.info(f"Successfully updated {len(assignments)} assignments in Snowflake")
+
+            # Display updated portfolio metrics after assignments
+            self.display_updated_portfolio_metrics(assignments)
+
             return True
 
         except Exception as e:
             logger.error(f"Failed to update assignments in Snowflake: {str(e)}")
             self.snowflake_conn.rollback()
             return False
+
+    def display_updated_portfolio_metrics(self, assignments):
+        """Display updated CSM portfolio metrics after assignments
+
+        Args:
+            assignments: Dictionary of account_id -> csm_name assignments
+        """
+        try:
+            logger.info("\n" + "="*80)
+            logger.info("📊 UPDATED CSM PORTFOLIO METRICS (After New Assignments)")
+            logger.info("="*80)
+
+            # Get the unique CSMs who received assignments
+            assigned_csms = list(set(assignments.values()))
+
+            if not assigned_csms:
+                logger.info("No assignments to update metrics for")
+                return
+
+            # Format CSM names for SQL
+            csm_names_str = "','".join(assigned_csms)
+
+            # Query to get BEFORE state (existing portfolios)
+            before_query = f"""
+            WITH csm_before AS (
+                SELECT
+                    responsible_csm as csm_name,
+                    COUNT(*) as total_accounts_before,
+                    SUM(CASE WHEN CORE_HEALTH_SCORE_COLOR = 'Red' THEN 1 ELSE 0 END) as red_before,
+                    SUM(CASE WHEN CORE_HEALTH_SCORE_COLOR = 'Yellow' THEN 1 ELSE 0 END) as yellow_before,
+                    SUM(CASE WHEN CORE_HEALTH_SCORE_COLOR = 'Green' THEN 1 ELSE 0 END) as green_before
+                FROM DSV_WAREHOUSE.PUBLIC_DATA_SETS.SALESFORCE_ACCOUNT_ALL_W_CHURN_SCORE_V
+                WHERE responsible_csm IN ('{csm_names_str}')
+                    AND REAL_ESTATE_MARKET = 'Residential'
+                    AND MANAGEMENT_LEVEL = 'Corporate Accounts'
+                GROUP BY responsible_csm
+            )
+            SELECT * FROM csm_before
+            ORDER BY csm_name
+            """
+
+            # Query to get NEW assignments with health segments
+            new_assignments_query = f"""
+            WITH new_assignments AS (
+                SELECT
+                    a.csm_name,
+                    a.account_id,
+                    COALESCE(s.CORE_HEALTH_SCORE_COLOR, 'Unknown') as health_segment
+                FROM {self.assignments_table} a
+                LEFT JOIN DSV_WAREHOUSE.PUBLIC_DATA_SETS.SALESFORCE_ACCOUNT_ALL_W_CHURN_SCORE_V s
+                    ON a.account_id = s.account_id_ob
+                WHERE a.csm_name IN ('{csm_names_str}')
+                    AND a.assignment_date >= DATEADD(minute, -10, CURRENT_TIMESTAMP())
+            ),
+            new_counts AS (
+                SELECT
+                    csm_name,
+                    COUNT(*) as new_accounts,
+                    SUM(CASE WHEN health_segment = 'Red' THEN 1 ELSE 0 END) as new_red,
+                    SUM(CASE WHEN health_segment = 'Yellow' THEN 1 ELSE 0 END) as new_yellow,
+                    SUM(CASE WHEN health_segment = 'Green' THEN 1 ELSE 0 END) as new_green
+                FROM new_assignments
+                GROUP BY csm_name
+            )
+            SELECT * FROM new_counts
+            ORDER BY csm_name
+            """
+
+            # Execute queries
+            before_df = self.execute_query(before_query)
+            new_df = self.execute_query(new_assignments_query)
+
+            # Merge and calculate AFTER metrics
+            logger.info("\nCSM Portfolio Changes:")
+            logger.info("-" * 80)
+            logger.info(f"{'CSM Name':<25} {'Metric':<15} {'Before':<20} {'New Assigned':<20} {'After':<20}")
+            logger.info("-" * 80)
+
+            for csm in assigned_csms:
+                # Get before data - handle case sensitivity
+                before_row = None
+                if not before_df.empty:
+                    # Convert column names to uppercase for consistent access
+                    before_df.columns = [col.upper() for col in before_df.columns]
+                    before_row = before_df[before_df['CSM_NAME'] == csm]
+
+                if before_row is None or before_row.empty:
+                    total_before = 0
+                    red_before = 0
+                    yellow_before = 0
+                    green_before = 0
+                else:
+                    before_row = before_row.iloc[0]
+                    total_before = int(before_row.get('TOTAL_ACCOUNTS_BEFORE', 0))
+                    red_before = int(before_row.get('RED_BEFORE', 0))
+                    yellow_before = int(before_row.get('YELLOW_BEFORE', 0))
+                    green_before = int(before_row.get('GREEN_BEFORE', 0))
+
+                # Get new assignments data - handle case sensitivity
+                new_row = None
+                if not new_df.empty:
+                    # Convert column names to uppercase for consistent access
+                    new_df.columns = [col.upper() for col in new_df.columns]
+                    new_row = new_df[new_df['CSM_NAME'] == csm]
+
+                if new_row is None or new_row.empty:
+                    new_accounts = 0
+                    new_red = 0
+                    new_yellow = 0
+                    new_green = 0
+                else:
+                    new_row = new_row.iloc[0]
+                    new_accounts = int(new_row.get('NEW_ACCOUNTS', 0))
+                    new_red = int(new_row.get('NEW_RED', 0))
+                    new_yellow = int(new_row.get('NEW_YELLOW', 0))
+                    new_green = int(new_row.get('NEW_GREEN', 0))
+
+                # Calculate after
+                total_after = total_before + new_accounts
+                red_after = red_before + new_red
+                yellow_after = yellow_before + new_yellow
+                green_after = green_before + new_green
+
+                # Display results
+                logger.info(f"{csm:<25} {'Total Accounts':<15} {total_before:<20} +{new_accounts:<19} {total_after:<20}")
+                logger.info(f"{'':<25} {'Red Accounts':<15} {red_before} ({100*red_before/max(total_before,1):.1f}%){'':^11} +{new_red:<19} {red_after} ({100*red_after/max(total_after,1):.1f}%)")
+                logger.info(f"{'':<25} {'Yellow Accounts':<15} {yellow_before} ({100*yellow_before/max(total_before,1):.1f}%){'':^11} +{new_yellow:<19} {yellow_after} ({100*yellow_after/max(total_after,1):.1f}%)")
+                logger.info(f"{'':<25} {'Green Accounts':<15} {green_before} ({100*green_before/max(total_before,1):.1f}%){'':^11} +{new_green:<19} {green_after} ({100*green_after/max(total_after,1):.1f}%)")
+
+                # Check if approaching limit
+                max_limit = self.limits.get('residential_corporate', {}).get('max_accounts_per_csm', 105)
+                if total_after >= max_limit - 5:
+                    logger.warning(f"  ⚠️ {csm} now has {total_after} accounts (approaching limit of {max_limit})")
+
+                logger.info("-" * 80)
+
+            logger.info("\n✅ Portfolio metrics updated successfully")
+            logger.info("="*80)
+
+        except Exception as e:
+            logger.error(f"Failed to display updated portfolio metrics: {str(e)}")
+            # Don't fail the main process if metrics display fails
+            pass
 
     def run(self, test_limit=None):
         """Main execution method
